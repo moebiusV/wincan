@@ -22,3 +22,4 @@ wincan 0.1.0 (2026-11-20)
   candled --official-klines: KuCoin's own final candle replaces a closed minute within seconds, and the mark price (every second) is served as "mark"; wincan's P&L and a trade closed with x use the mark, as KuCoin does, so the P&L moves every second.
   Dragging: the window may be taken partly off the screen, and snaps flush to an edge of the usable screen within 14 pixels of it.
   Dragging: wincan does its own drag (no drift); any edge of the window snaps to any edge of the usable screen within 25 pixels, from inside or outside.
+  The snap distance is 20 pixels (25 was tried).

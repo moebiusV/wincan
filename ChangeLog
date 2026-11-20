@@ -17,3 +17,4 @@
 2026-11-20  Official candles: the last three closed minutes are fetched every three seconds and put in whenever seen, no timing assumed.
 2026-11-20  Snap to the screen edges when dragged; no clamping.
 2026-11-20  Own drag loop (the system's drifted with the snapping); snap of all four window edges to all four screen edges, 25 pixels.
+2026-11-20  Snap distance 20 pixels.
