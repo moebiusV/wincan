@@ -7,3 +7,6 @@ candlewin 0.1.0 (2026-11-20)
   candled --backfill DIR: a minute comes from --dir where it has data, else from the backfill (spot candles for the time before the perpetual
   collector started); indicators in the window (Bollinger bands 20/2, 9 and 200 moving averages), each switched by a small dot at the bottom; the
   window starts at the top left of the screen and is kept fully on a screen.
+  Polling: once the history is whole, the window asks once a second for only the last two bars with the signature it holds; the server answers
+  "unchanged" in a few bytes when nothing moved, and a settled bar is replaced by its final values as the next one starts.  The current candle is drawn
+  brighter and thicker, with black space to its right.

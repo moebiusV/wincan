@@ -49,7 +49,7 @@ static struct {
     int    n; double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS];
     double price; double age_ms; int complete, have, failed;
     char   data_pair[24]; int data_tf;
-    struct { char pair[24]; int tf, n, complete; double o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS], price, age_ms; DWORD when; } *cache; int ncache;      /* every timeframe looked at is kept, so going back to one is instant */
+    struct { char pair[24]; int tf, n, complete, need_full; double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS], price, age_ms; DWORD when, full_when; char sig[24]; } *cache; int ncache;      /* every timeframe looked at is kept, so going back to one is instant */
     char   ip[64];                       /* the server's address, found once: resolving a .local name takes a third of a second */
     HANDLE wake; volatile int quit;
     /* ui */
@@ -200,6 +200,16 @@ static double get_num(const char *body, const char *key)
     return p ? strtod(p + strlen(pat), NULL) : 0;
 }
 
+static int get_str(const char *body, const char *key, char *out, size_t cap)
+{
+    char pat[24]; snprintf(pat, sizeof pat, "\"%s\":\"", key);
+    const char *p = strstr(body, pat);
+    if (!p) return 0;
+    p += strlen(pat); size_t i = 0;
+    while (*p && *p != '"' && i + 1 < cap) out[i++] = *p++;
+    out[i] = 0; return 1;
+}
+
 static void fetch_pairs(void)
 {
     char *b = http_get("/pairs");
@@ -225,44 +235,75 @@ static void fetch_pairs(void)
     LeaveCriticalSection(&A.cs);
 }
 
+static void show_cached(void);
+
+static int find_slot(const char *pair, int tf) { for (int i = 0; i < A.ncache; i++) if (A.cache[i].tf == tf && !strcmp(A.cache[i].pair, pair)) return i; return -1; }
+
 static DWORD WINAPI worker(LPVOID arg)
 {
     (void)arg;
     DWORD last_pairs = 0, last_resolve = 0;
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
+    static double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS];
     while (!A.quit) {
         if (!A.ip[0] || GetTickCount() - last_resolve > 300000) { resolve(); last_resolve = GetTickCount(); }
         DWORD now = GetTickCount();
         if (last_pairs == 0 || now - last_pairs > 60000) { fetch_pairs(); last_pairs = now; PostMessage(A.hwnd, WM_DATA, 0, 0); }
-        char pair[24]; int tf, bars;
+        char pair[24], sig[24] = ""; int tf, bars, incremental = 0;
         EnterCriticalSection(&A.cs);
         snprintf(pair, sizeof pair, "%s", A.pair); tf = A.tf;
         bars = (BASE_W * A.scale / 100 - 8) / 4 + 205; if (bars > MAX_BARS) bars = MAX_BARS; if (bars < 10) bars = 10;      /* what is shown, and 200 more for the longest average */
+        int sl = find_slot(pair, tf);
+        /* once the history is whole, a second's poll asks only for the last two bars and sends the signature it has: "unchanged" costs a few bytes */
+        if (sl >= 0 && A.cache[sl].n >= 2 && A.cache[sl].complete && !A.cache[sl].need_full && A.cache[sl].sig[0]
+            && now - A.cache[sl].full_when < 300000 && A.cache[sl].n >= bars - 8) { incremental = 1; snprintf(sig, sizeof sig, "%s", A.cache[sl].sig); }
         LeaveCriticalSection(&A.cs);
-        char path[160]; snprintf(path, sizeof path, "/candles?pair=%s&tf=%s&n=%d", pair, TFS[tf], bars);
+        char path[200];
+        if (incremental) snprintf(path, sizeof path, "/candles?pair=%s&tf=%s&n=2&sig=%s", pair, TFS[tf], sig);
+        else snprintf(path, sizeof path, "/candles?pair=%s&tf=%s&n=%d", pair, TFS[tf], bars);
         char *b = http_get(path);
         EnterCriticalSection(&A.cs);
         if (b) {
-            static double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS];
-            int n = get_arr(b, "t", t, MAX_BARS);
-            if (n > 0 && get_arr(b, "o", o, MAX_BARS) == n && get_arr(b, "h", h, MAX_BARS) == n && get_arr(b, "l", l, MAX_BARS) == n && get_arr(b, "c", c, MAX_BARS) == n) {
-                double price = get_num(b, "price"), age = get_num(b, "age_ms"); int complete = strstr(b, "\"complete\":true") != NULL;
-                int slot = -1;
-                for (int i = 0; i < A.ncache; i++) if (A.cache[i].tf == tf && !strcmp(A.cache[i].pair, pair)) slot = i;
-                if (slot < 0) {
-                    if (A.ncache < 40) slot = A.ncache++;
-                    else { slot = 0; for (int i = 1; i < A.ncache; i++) if (A.cache[i].when < A.cache[slot].when) slot = i; }       /* the oldest goes */
-                }
-                snprintf(A.cache[slot].pair, sizeof A.cache[slot].pair, "%s", pair); A.cache[slot].tf = tf; A.cache[slot].n = n; A.cache[slot].complete = complete;
-                memcpy(A.cache[slot].o, o, sizeof o); memcpy(A.cache[slot].h, h, sizeof h); memcpy(A.cache[slot].l, l, sizeof l); memcpy(A.cache[slot].c, c, sizeof c);
-                A.cache[slot].price = price; A.cache[slot].age_ms = age; A.cache[slot].when = GetTickCount();
+            double price = get_num(b, "price"), age = get_num(b, "age_ms"); int complete = strstr(b, "\"complete\":true") != NULL;
+            char nsig[24] = ""; get_str(b, "sig", nsig, sizeof nsig);
+            int slot = find_slot(pair, tf);
+            if (strstr(b, "\"unchanged\":true") && slot >= 0) {                      /* nothing moved: only the age and the price may have */
+                A.cache[slot].price = price > 0 ? price : A.cache[slot].price; A.cache[slot].age_ms = age; A.cache[slot].complete = complete;
                 A.failed = 0;
-                if (!strcmp(A.pair, pair) && A.tf == tf) {         /* still the one asked for */
-                    memcpy(A.o, o, sizeof o); memcpy(A.h, h, sizeof h); memcpy(A.l, l, sizeof l); memcpy(A.c, c, sizeof c);
-                    A.n = n; A.price = price; A.age_ms = age; A.complete = complete; A.have = 1;
-                    snprintf(A.data_pair, sizeof A.data_pair, "%s", pair); A.data_tf = tf;
-                }
-            } else { A.failed = 1; }
+            } else {
+                int n = get_arr(b, "t", t, MAX_BARS);
+                if (n > 0 && get_arr(b, "o", o, MAX_BARS) == n && get_arr(b, "h", h, MAX_BARS) == n && get_arr(b, "l", l, MAX_BARS) == n && get_arr(b, "c", c, MAX_BARS) == n) {
+                    if (slot < 0) {
+                        if (A.ncache < 40) slot = A.ncache++;
+                        else { slot = 0; for (int i = 1; i < A.ncache; i++) if (A.cache[i].when < A.cache[slot].when) slot = i; }       /* the oldest goes */
+                        A.cache[slot].n = 0; A.cache[slot].need_full = 0;
+                    }
+                    snprintf(A.cache[slot].pair, sizeof A.cache[slot].pair, "%s", pair); A.cache[slot].tf = tf;
+                    if (incremental && A.cache[slot].n >= 2) {
+                        /* merge the last bars: a bar that is there is replaced (it settled), a newer one is added; a hole means a full fetch next time */
+                        double step = (tf == 0 ? 1 : tf == 1 ? 3 : tf == 2 ? 5 : tf == 3 ? 15 : tf == 4 ? 30 : tf == 5 ? 60 : tf == 6 ? 240 : tf == 7 ? 1440 : 10080) * 60.0;
+                        for (int j = 0; j < n; j++) {
+                            int cn = A.cache[slot].n, k = -1;
+                            for (int q = cn - 1; q >= 0 && q >= cn - 4; q--) if (A.cache[slot].t[q] == t[j]) { k = q; break; }
+                            if (k < 0) {
+                                if (t[j] > A.cache[slot].t[cn - 1]) {
+                                    if (t[j] - A.cache[slot].t[cn - 1] > step * 1.5 + 60) { A.cache[slot].need_full = 1; continue; }
+                                    if (cn >= MAX_BARS) { memmove(A.cache[slot].t, A.cache[slot].t + 1, sizeof(double) * (MAX_BARS - 1)); memmove(A.cache[slot].o, A.cache[slot].o + 1, sizeof(double) * (MAX_BARS - 1)); memmove(A.cache[slot].h, A.cache[slot].h + 1, sizeof(double) * (MAX_BARS - 1)); memmove(A.cache[slot].l, A.cache[slot].l + 1, sizeof(double) * (MAX_BARS - 1)); memmove(A.cache[slot].c, A.cache[slot].c + 1, sizeof(double) * (MAX_BARS - 1)); cn--; }
+                                    k = cn; A.cache[slot].n = cn + 1;
+                                } else continue;
+                            }
+                            A.cache[slot].t[k] = t[j]; A.cache[slot].o[k] = o[j]; A.cache[slot].h[k] = h[j]; A.cache[slot].l[k] = l[j]; A.cache[slot].c[k] = c[j];
+                        }
+                    } else {
+                        memcpy(A.cache[slot].t, t, sizeof t); memcpy(A.cache[slot].o, o, sizeof o); memcpy(A.cache[slot].h, h, sizeof h); memcpy(A.cache[slot].l, l, sizeof l); memcpy(A.cache[slot].c, c, sizeof c);
+                        A.cache[slot].n = n; A.cache[slot].need_full = 0; A.cache[slot].full_when = GetTickCount();
+                    }
+                    snprintf(A.cache[slot].sig, sizeof A.cache[slot].sig, "%s", nsig);
+                    A.cache[slot].complete = complete; A.cache[slot].price = price; A.cache[slot].age_ms = age; A.cache[slot].when = GetTickCount();
+                    A.failed = 0;
+                } else A.failed = 1;
+            }
+            if (slot >= 0 && !strcmp(A.pair, pair) && A.tf == tf) show_cached();       /* still the one asked for */
             free(b);
         } else { A.failed = 1; if (!g_conn) A.ip[0] = 0; }          /* the connection is gone: look the name up again next time */
         LeaveCriticalSection(&A.cs);
@@ -350,7 +391,8 @@ static void paint(HDC dc, int W, int H)
         text(dc, fn, failed ? COL_DOWN : COL_DIM, W / 2, H / 2 - U(8), failed ? "no data from the server" : "loading...", 2);
     } else {
         /* the chart */
-        int vis = (W - U(8)) / 4; if (vis < 10) vis = 10;
+        int rpad = U(12);                                          /* black space at the right, to see the newest candle move */
+        int vis = (W - U(8) - rpad) / 4; if (vis < 10) vis = 10;
         int dn = n < vis ? n : vis, base = n - dn;                      /* the bars shown are base .. n-1 */
         static double ma9[MAX_BARS], ma200[MAX_BARS], bbm[MAX_BARS], bbu[MAX_BARS], bbl[MAX_BARS];
         static unsigned char ok9[MAX_BARS], ok200[MAX_BARS], okbb[MAX_BARS];
@@ -372,7 +414,7 @@ static void paint(HDC dc, int W, int H)
             range = hi - lo;
         }
         double pad = range * 0.04; hi += pad; lo -= pad; range = hi - lo;
-        int cw = W - U(8), ch = bot - top;
+        int cw = W - U(8) - rpad, ch = bot - top;
         #define Y(p) (top + (int)((hi - (p)) / range * ch + 0.5))
         int step = dn > 0 ? cw / dn : 4; if (step < 2) step = 2;
         int bw = step >= 4 ? step - 1 : step - 1 > 0 ? step - 1 : 1; if (bw > step - 1 && step > 1) bw = step - 1;
@@ -387,11 +429,13 @@ static void paint(HDC dc, int W, int H)
         if (A.ind[1]) LINE(ma9, ok9, COL_MA9, PS_SOLID);
         SelectClipRgn(dc, NULL); DeleteObject(clip);
         for (int i = base; i < n; i++) {
-            COLORREF col = c[i] >= o[i] ? COL_UP : COL_DOWN;
-            int x = x0 + (i - base) * step, cx = x + bw / 2;
-            rect(dc, cx, Y(h[i]), cx + 1, Y(l[i]) + 1, col);
+            int cur = i == n - 1;                                   /* the candle still forming: brighter and thicker */
+            COLORREF col = c[i] >= o[i] ? (cur ? RGB(90, 235, 140) : COL_UP) : (cur ? RGB(255, 120, 120) : COL_DOWN);
+            int x = x0 + (i - base) * step + (cur ? 1 : 0), cx = x + bw / 2, w = cur ? bw + 2 : bw, wk = cur ? 2 : 1;
+            if (cur) x -= 1;
+            rect(dc, cx, Y(h[i]), cx + wk, Y(l[i]) + 1, col);
             int yo = Y(o[i]), yc = Y(c[i]); if (yo > yc) { int tmp = yo; yo = yc; yc = tmp; }
-            rect(dc, x, yo, x + bw, yc + 1 > yo + 1 ? yc + 1 : yo + 1, col);
+            rect(dc, x, yo, x + w, yc + 1 > yo + 1 ? yc + 1 : yo + 1, col);
         }
         if (pos.entry > 0 && pos.size != 0) {
             int y = Y(pos.entry);

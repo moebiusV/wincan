@@ -136,6 +136,19 @@ static void arr(char *buf, size_t cap, int *o, const char *key, const float *v, 
     *o += snprintf(buf + *o, cap - (size_t)*o, "]");
 }
 
+/* a signature of the last two bars (start, open, high, low, close, volume): the same as the client's means nothing has changed, as in a second without a trade */
+static void signature(const Out *o, char *sig)
+{
+    uint64_t h = 1469598103934665603ULL;
+    for (int i = o->n > 2 ? o->n - 2 : 0; i < o->n; i++) {
+        uint32_t w[5]; memcpy(&w[0], &o->o[i], 4); memcpy(&w[1], &o->h[i], 4); memcpy(&w[2], &o->l[i], 4); memcpy(&w[3], &o->c[i], 4); memcpy(&w[4], &o->v[i], 4);
+        uint64_t t = (uint64_t)o->t[i];
+        for (int k = 0; k < 8; k++) { h ^= (t >> (8 * k)) & 0xff; h *= 1099511628211ULL; }
+        for (int j = 0; j < 5; j++) for (int k = 0; k < 4; k++) { h ^= (w[j] >> (8 * k)) & 0xff; h *= 1099511628211ULL; }
+    }
+    snprintf(sig, 20, "%016llx", (unsigned long long)h);
+}
+
 static const char *qparam(const char *q, const char *key, char *out, size_t cap)
 {
     size_t kl = strlen(key);
@@ -176,8 +189,8 @@ static int handle(int fd, char *body, size_t bodycap, Out *out)
     char *q = strchr(path, '?'); if (q) *q++ = 0;
     if (!strcmp(path, "/pairs")) { int n = pairs_json(body, bodycap); respond(fd, 200, "OK", body, n); return 1; }
     if (!strcmp(path, "/candles")) {
-        char pair[40] = "", tfs[16] = "1m", ns[16] = "60";
-        qparam(q, "pair", pair, sizeof pair); qparam(q, "tf", tfs, sizeof tfs); qparam(q, "n", ns, sizeof ns);
+        char pair[40] = "", tfs[16] = "1m", ns[16] = "60", seen[24] = "";
+        qparam(q, "pair", pair, sizeof pair); qparam(q, "tf", tfs, sizeof tfs); qparam(q, "n", ns, sizeof ns); qparam(q, "sig", seen, sizeof seen);
         int tf = tf_minutes(tfs), n = atoi(ns);
         if (!valid_pair(pair) || !tf || n < 1) { respond(fd, 400, "Bad Request", "{\"error\":\"pair, tf (1m 3m 5m 15m 30m 1h 4h 1d 1w) or n wrong\"}", 62); return 1; }
         if (n > MAX_BARS) n = MAX_BARS;
@@ -186,8 +199,15 @@ static int handle(int fd, char *body, size_t bodycap, Out *out)
         if (c->has_a) series_refresh(&c->a);
         if (c->has_b) series_refresh(&c->b);
         series_query2(c->has_a ? &c->a : NULL, c->has_b ? &c->b : NULL, tf, n, now_ms(), out);
-        int o = snprintf(body, bodycap, "{\"pair\":\"%s\",\"tf\":\"%s\",\"price\":%.8g,\"age_ms\":%lld,\"complete\":%s,\"n\":%d,",
-                         pair, tfs, (double)out->price, (long long)out->age_ms, out->complete ? "true" : "false", out->n);
+        char sig[24]; signature(out, sig);
+        if (seen[0] && !strcmp(seen, sig)) {                       /* nothing changed since the client's last answer: a few bytes only */
+            int u = snprintf(body, bodycap, "{\"pair\":\"%s\",\"tf\":\"%s\",\"unchanged\":true,\"sig\":\"%s\",\"price\":%.8g,\"age_ms\":%lld,\"complete\":%s}",
+                             pair, tfs, sig, (double)out->price, (long long)out->age_ms, out->complete ? "true" : "false");
+            respond(fd, 200, "OK", body, u);
+            return 1;
+        }
+        int o = snprintf(body, bodycap, "{\"pair\":\"%s\",\"tf\":\"%s\",\"sig\":\"%s\",\"price\":%.8g,\"age_ms\":%lld,\"complete\":%s,\"n\":%d,",
+                         pair, tfs, sig, (double)out->price, (long long)out->age_ms, out->complete ? "true" : "false", out->n);
         arr(body, bodycap, &o, "t", NULL, out->t, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");
         arr(body, bodycap, &o, "o", out->o, NULL, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");
         arr(body, bodycap, &o, "h", out->h, NULL, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");

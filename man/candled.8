@@ -75,6 +75,16 @@ is the last close;
 is the time since the collector's last candle (a collector that has stopped shows a growing age);
 .B complete
 is false while the older history is still being read.
+.B sig
+is a signature of the last two bars.  A client that polls sends it back as
+.BR sig=... ,
+with a small
+.BR n ,
+usually 2: if nothing has changed (as in a second without a trade) the answer is only
+.B {"unchanged":true,"sig":...,"price":...,"age_ms":...,"complete":...}\fR,
+otherwise the last
+.I n
+bars, to be merged by their start times into what the client already has.
 .SH LIMITS
 Without markers (the start of an old file, a stalled collector) the file's modification time stands for the end of the data.
 Bars older than the last interruption of the collector have their order and shape right but their clock times drift by the length of the gap.
