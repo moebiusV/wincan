@@ -444,7 +444,7 @@ static void fmt_price(double p, char *out, size_t cap)
 static void fmt_money(double v, char *out, size_t cap)
 {
     double a = fabs(v);
-    snprintf(out, cap, "%s$%.*f", v < 0 ? "-" : "+", a >= 100 ? 0 : 2, a);
+    snprintf(out, cap, "%s$%.2f", v < 0 ? "-" : "+", a);                   /* always dollars and cents */
 }
 
 static HFONT font(int px, int bold) { return CreateFontA(-px, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, "Segoe UI"); }
