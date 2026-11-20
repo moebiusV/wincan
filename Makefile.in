@@ -25,7 +25,7 @@ candled: src/candled.c src/agg.c src/agg.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ src/candled.c src/agg.c -lpthread
 
 candlewin.exe: src/candlewin.c
-	$(WINCC) $(CFLAGS) $(WARN) -mwindows -o $@ src/candlewin.c -lgdi32 -lwinhttp -lshell32 -luser32
+	$(WINCC) $(CFLAGS) $(WARN) -mwindows -o $@ src/candlewin.c -lgdi32 -lwinhttp -lshell32 -luser32 -lws2_32
 
 win: candlewin.exe
 

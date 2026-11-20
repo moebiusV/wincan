@@ -27,7 +27,7 @@ int series_open(Series *s, const char *path, int cap)
     s->cap = cap;
     s->bars = calloc((size_t)cap, sizeof(Bar));
     if (!s->bars) return -1;
-    pthread_mutex_init(&s->mu, NULL);
+    pthread_mutex_init(&s->mu, NULL); pthread_mutex_init(&s->rmu, NULL);
     return 0;
 }
 
@@ -243,7 +243,16 @@ int series_history(Series *s, int64_t nbytes)
     return more;
 }
 
+static int refresh_locked(Series *s);
 int series_refresh(Series *s)
+{
+    pthread_mutex_lock(&s->rmu);
+    int rc = refresh_locked(s);
+    pthread_mutex_unlock(&s->rmu);
+    return rc;
+}
+
+static int refresh_locked(Series *s)
 {
     int64_t size, mt;
     if (stat_file(s, &size, &mt) < 0) return -1;

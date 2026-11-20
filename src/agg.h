@@ -35,7 +35,8 @@ typedef struct {
     int64_t         first_ms;         /* time of the first candle folded */
     int             history_done;
     float           price;            /* the last close */
-    pthread_mutex_t mu;
+    pthread_mutex_t mu;               /* the bars */
+    pthread_mutex_t rmu;              /* one refresh at a time */
 } Series;
 
 typedef struct {

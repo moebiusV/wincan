@@ -20,6 +20,8 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <stdint.h>
 #include <arpa/inet.h>
 
 #define MAX_PAIRS 256
@@ -87,6 +89,7 @@ static int pairs_json(char *buf, size_t cap)
         struct stat st; if (stat(path, &st) < 0 || !series_valid(path)) continue;
         memcpy(list[n].n, e->d_name, l - 4); list[n].n[l - 4] = 0;
         if (!valid_pair(list[n].n)) continue;
+        if (st.st_mtime < time(NULL) - 3 * 86400) continue;           /* not written for three days: the collector is not on it */
         list[n].t = st.st_mtime; n++;
     }
     closedir(d);
@@ -124,52 +127,68 @@ static const char *qparam(const char *q, const char *key, char *out, size_t cap)
 static void respond(int fd, int code, const char *status, const char *body, int len)
 {
     char head[256];
-    int h = snprintf(head, sizeof head, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", code, status, len);
+    int h = snprintf(head, sizeof head, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nCache-Control: no-store\r\nConnection: keep-alive\r\nKeep-Alive: timeout=60\r\n\r\n", code, status, len);
     if (write(fd, head, (size_t)h) < 0) return;
     for (int off = 0; off < len; ) { ssize_t w = write(fd, body + off, (size_t)(len - off)); if (w <= 0) return; off += (int)w; }
 }
 
-static void handle(int fd)
+/* one request; returns 1 to keep the connection for the next */
+static int handle(int fd, char *body, size_t bodycap, Out *out)
 {
     char req[2048]; ssize_t got = 0;
     while (got < (ssize_t)sizeof req - 1) {
         ssize_t r = read(fd, req + got, sizeof req - 1 - (size_t)got);
-        if (r <= 0) break;
+        if (r <= 0) return 0;                                        /* closed, or idle for too long */
         got += r; req[got] = 0;
         if (strstr(req, "\r\n\r\n") || strstr(req, "\n\n")) break;
     }
-    if (got <= 0) return;
-    req[got] = 0;
-    static char body[64 * 1024];
-    if (strncmp(req, "GET ", 4)) { respond(fd, 405, "Method Not Allowed", "{\"error\":\"GET only\"}", 20); return; }
+    if (got <= 0) return 0;
+    if (strncmp(req, "GET ", 4)) { respond(fd, 405, "Method Not Allowed", "{\"error\":\"GET only\"}", 20); return 0; }
     char *path = req + 4, *sp = strchr(path, ' ');
-    if (!sp) { respond(fd, 400, "Bad Request", "{\"error\":\"bad request\"}", 23); return; }
+    if (!sp) { respond(fd, 400, "Bad Request", "{\"error\":\"bad request\"}", 23); return 0; }
     *sp = 0;
     char *q = strchr(path, '?'); if (q) *q++ = 0;
-    if (!strcmp(path, "/pairs")) { int n = pairs_json(body, sizeof body); respond(fd, 200, "OK", body, n); return; }
+    if (!strcmp(path, "/pairs")) { int n = pairs_json(body, bodycap); respond(fd, 200, "OK", body, n); return 1; }
     if (!strcmp(path, "/candles")) {
         char pair[40] = "", tfs[16] = "1m", ns[16] = "60";
         qparam(q, "pair", pair, sizeof pair); qparam(q, "tf", tfs, sizeof tfs); qparam(q, "n", ns, sizeof ns);
         int tf = tf_minutes(tfs), n = atoi(ns);
-        if (!valid_pair(pair) || !tf || n < 1) { respond(fd, 400, "Bad Request", "{\"error\":\"pair, tf (1m 3m 5m 15m 30m 1h 4h 1d 1w) or n wrong\"}", 62); return; }
+        if (!valid_pair(pair) || !tf || n < 1) { respond(fd, 400, "Bad Request", "{\"error\":\"pair, tf (1m 3m 5m 15m 30m 1h 4h 1d 1w) or n wrong\"}", 62); return 1; }
         if (n > MAX_BARS) n = MAX_BARS;
         Coin *c = coin_get(pair);
-        if (!c) { respond(fd, 404, "Not Found", "{\"error\":\"no such pair\"}", 24); return; }
+        if (!c) { respond(fd, 404, "Not Found", "{\"error\":\"no such pair\"}", 24); return 1; }
         series_refresh(&c->s);
-        static Out out;
-        series_query(&c->s, tf, n, now_ms(), &out);
-        int o = snprintf(body, sizeof body, "{\"pair\":\"%s\",\"tf\":\"%s\",\"price\":%.8g,\"age_ms\":%lld,\"complete\":%s,\"n\":%d,",
-                         pair, tfs, (double)out.price, (long long)out.age_ms, out.complete ? "true" : "false", out.n);
-        arr(body, sizeof body, &o, "t", NULL, out.t, out.n); o += snprintf(body + o, sizeof body - (size_t)o, ",");
-        arr(body, sizeof body, &o, "o", out.o, NULL, out.n); o += snprintf(body + o, sizeof body - (size_t)o, ",");
-        arr(body, sizeof body, &o, "h", out.h, NULL, out.n); o += snprintf(body + o, sizeof body - (size_t)o, ",");
-        arr(body, sizeof body, &o, "l", out.l, NULL, out.n); o += snprintf(body + o, sizeof body - (size_t)o, ",");
-        arr(body, sizeof body, &o, "c", out.c, NULL, out.n); o += snprintf(body + o, sizeof body - (size_t)o, ",");
-        arr(body, sizeof body, &o, "v", out.v, NULL, out.n); o += snprintf(body + o, sizeof body - (size_t)o, "}");
+        series_query(&c->s, tf, n, now_ms(), out);
+        int o = snprintf(body, bodycap, "{\"pair\":\"%s\",\"tf\":\"%s\",\"price\":%.8g,\"age_ms\":%lld,\"complete\":%s,\"n\":%d,",
+                         pair, tfs, (double)out->price, (long long)out->age_ms, out->complete ? "true" : "false", out->n);
+        arr(body, bodycap, &o, "t", NULL, out->t, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");
+        arr(body, bodycap, &o, "o", out->o, NULL, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");
+        arr(body, bodycap, &o, "h", out->h, NULL, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");
+        arr(body, bodycap, &o, "l", out->l, NULL, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");
+        arr(body, bodycap, &o, "c", out->c, NULL, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");
+        arr(body, bodycap, &o, "v", out->v, NULL, out->n); o += snprintf(body + o, bodycap - (size_t)o, "}");
         respond(fd, 200, "OK", body, o);
-        return;
+        return 1;
     }
     respond(fd, 404, "Not Found", "{\"error\":\"not found\"}", 21);
+    return 1;
+}
+
+static volatile int nconn;
+static pthread_mutex_t nconn_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* a connection stays open for as many requests as the client sends, until it closes or is idle for a minute */
+static void *serve(void *arg)
+{
+    int fd = (int)(intptr_t)arg;
+    struct timeval tv = { 60, 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    char *body = malloc(64 * 1024); Out *out = malloc(sizeof *out);
+    if (body && out) while (handle(fd, body, 64 * 1024, out)) ;
+    free(body); free(out); close(fd);
+    pthread_mutex_lock(&nconn_mu); nconn--; pthread_mutex_unlock(&nconn_mu);
+    return NULL;
 }
 
 int main(int argc, char **argv)
@@ -192,9 +211,10 @@ int main(int argc, char **argv)
     for (;;) {
         int fd = accept(ls, NULL, NULL);
         if (fd < 0) { if (errno == EINTR) continue; perror("accept"); sleep(1); continue; }
-        struct timeval tv = { 2, 0 };
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-        handle(fd);
-        close(fd);
+        pthread_mutex_lock(&nconn_mu); int busy = nconn >= 32; if (!busy) nconn++; pthread_mutex_unlock(&nconn_mu);
+        if (busy) { close(fd); continue; }
+        pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&th, &at, serve, (void *)(intptr_t)fd) != 0) { pthread_mutex_lock(&nconn_mu); nconn--; pthread_mutex_unlock(&nconn_mu); close(fd); }
+        pthread_attr_destroy(&at);
     }
 }

@@ -8,6 +8,8 @@
 #define _WIN32_WINNT 0x0601
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <winhttp.h>
 #include <shellapi.h>
 #include <stdio.h>
@@ -46,6 +48,8 @@ static struct {
     int    n; double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS];
     double price; double age_ms; int complete, have, failed;
     char   data_pair[24]; int data_tf;
+    struct { char pair[24]; int tf, n, complete; double o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS], price, age_ms; DWORD when; } *cache; int ncache;      /* every timeframe looked at is kept, so going back to one is instant */
+    char   ip[64];                       /* the server's address, found once: resolving a .local name takes a third of a second */
     HANDLE wake; volatile int quit;
     /* ui */
     int    active, dragging, editing, tracking, hidden;   /* editing: 0 none, 'e' entry, 's' size */
@@ -119,33 +123,55 @@ static void parse_server(const char *s)
 
 /* ---------------------------------------------------------------- the network (a worker thread) */
 
+static void resolve(void)
+{
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints); hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
+    A.ip[0] = 0;
+    if (getaddrinfo(A.host, NULL, &hints, &res) == 0 && res) {
+        struct sockaddr_in *sa = (struct sockaddr_in *)res->ai_addr;
+        snprintf(A.ip, sizeof A.ip, "%s", inet_ntoa(sa->sin_addr));
+    }
+    if (res) freeaddrinfo(res);
+}
+
+static HINTERNET g_sess, g_conn;                  /* kept open: one connection, reused for every request */
+
+static void http_close(void)
+{
+    if (g_conn) WinHttpCloseHandle(g_conn);
+    if (g_sess) WinHttpCloseHandle(g_sess);
+    g_conn = g_sess = NULL;
+}
+
 static char *http_get(const char *path)
 {
-    wchar_t whost[160], wpath[256];
-    MultiByteToWideChar(CP_UTF8, 0, A.host, -1, whost, 160);
+    wchar_t wpath[256];
     MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 256);
-    char *out = NULL;
-    HINTERNET s = WinHttpOpen(L"candlewin/" L"0.1", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
-    if (!s) return NULL;
-    WinHttpSetTimeouts(s, 3000, 3000, 3000, 5000);
-    HINTERNET c = WinHttpConnect(s, whost, (INTERNET_PORT)A.port, 0);
-    HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", wpath, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0) : NULL;
+    if (!g_conn) {                                  /* only at the start, or after a failure */
+        wchar_t whost[160];
+        MultiByteToWideChar(CP_UTF8, 0, A.ip[0] ? A.ip : A.host, -1, whost, 160);
+        g_sess = WinHttpOpen(L"candlewin/0.1", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
+        if (!g_sess) return NULL;
+        WinHttpSetTimeouts(g_sess, 3000, 3000, 3000, 5000);
+        g_conn = WinHttpConnect(g_sess, whost, (INTERNET_PORT)A.port, 0);
+        if (!g_conn) { http_close(); return NULL; }
+    }
+    char *out = NULL; int ok = 0;
+    HINTERNET r = WinHttpOpenRequest(g_conn, L"GET", wpath, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
     if (r && WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(r, NULL)) {
         DWORD code = 0, sz = sizeof code;
         WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &code, &sz, NULL);
-        if (code == 200) {
-            size_t cap = 8192, len = 0; out = malloc(cap);
-            DWORD got;
-            while (out && WinHttpReadData(r, out + len, (DWORD)(cap - len - 1), &got) && got > 0) {
-                len += got;
-                if (cap - len < 4096) { cap *= 2; char *n = realloc(out, cap); if (!n) { free(out); out = NULL; break; } out = n; }
-            }
-            if (out) out[len] = 0;
+        size_t cap = 8192, len = 0; char *buf = malloc(cap);
+        DWORD got = 0; ok = 1;
+        while (buf && WinHttpReadData(r, buf + len, (DWORD)(cap - len - 1), &got) && got > 0) {      /* read it all: the connection is then free for the next request */
+            len += got;
+            if (cap - len < 4096) { cap *= 2; char *n = realloc(buf, cap); if (!n) { free(buf); buf = NULL; break; } buf = n; }
         }
+        if (buf) { buf[len] = 0; if (code == 200) out = buf; else free(buf); }
     }
     if (r) WinHttpCloseHandle(r);
-    if (c) WinHttpCloseHandle(c);
-    WinHttpCloseHandle(s);
+    if (!ok) http_close();                          /* the connection broke: start again, with the name looked up anew */
     return out;
 }
 
@@ -196,8 +222,10 @@ static void fetch_pairs(void)
 static DWORD WINAPI worker(LPVOID arg)
 {
     (void)arg;
-    DWORD last_pairs = 0;
+    DWORD last_pairs = 0, last_resolve = 0;
+    WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
     while (!A.quit) {
+        if (!A.ip[0] || GetTickCount() - last_resolve > 300000) { resolve(); last_resolve = GetTickCount(); }
         DWORD now = GetTickCount();
         if (last_pairs == 0 || now - last_pairs > 60000) { fetch_pairs(); last_pairs = now; PostMessage(A.hwnd, WM_DATA, 0, 0); }
         char pair[24]; int tf, bars;
@@ -212,12 +240,25 @@ static DWORD WINAPI worker(LPVOID arg)
             static double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS];
             int n = get_arr(b, "t", t, MAX_BARS);
             if (n > 0 && get_arr(b, "o", o, MAX_BARS) == n && get_arr(b, "h", h, MAX_BARS) == n && get_arr(b, "l", l, MAX_BARS) == n && get_arr(b, "c", c, MAX_BARS) == n) {
-                memcpy(A.t, t, sizeof t); memcpy(A.o, o, sizeof o); memcpy(A.h, h, sizeof h); memcpy(A.l, l, sizeof l); memcpy(A.c, c, sizeof c);
-                A.n = n; A.price = get_num(b, "price"); A.age_ms = get_num(b, "age_ms"); A.complete = strstr(b, "\"complete\":true") != NULL;
-                A.have = 1; A.failed = 0; snprintf(A.data_pair, sizeof A.data_pair, "%s", pair); A.data_tf = tf;
+                double price = get_num(b, "price"), age = get_num(b, "age_ms"); int complete = strstr(b, "\"complete\":true") != NULL;
+                int slot = -1;
+                for (int i = 0; i < A.ncache; i++) if (A.cache[i].tf == tf && !strcmp(A.cache[i].pair, pair)) slot = i;
+                if (slot < 0) {
+                    if (A.ncache < 40) slot = A.ncache++;
+                    else { slot = 0; for (int i = 1; i < A.ncache; i++) if (A.cache[i].when < A.cache[slot].when) slot = i; }       /* the oldest goes */
+                }
+                snprintf(A.cache[slot].pair, sizeof A.cache[slot].pair, "%s", pair); A.cache[slot].tf = tf; A.cache[slot].n = n; A.cache[slot].complete = complete;
+                memcpy(A.cache[slot].o, o, sizeof o); memcpy(A.cache[slot].h, h, sizeof h); memcpy(A.cache[slot].l, l, sizeof l); memcpy(A.cache[slot].c, c, sizeof c);
+                A.cache[slot].price = price; A.cache[slot].age_ms = age; A.cache[slot].when = GetTickCount();
+                A.failed = 0;
+                if (!strcmp(A.pair, pair) && A.tf == tf) {         /* still the one asked for */
+                    memcpy(A.o, o, sizeof o); memcpy(A.h, h, sizeof h); memcpy(A.l, l, sizeof l); memcpy(A.c, c, sizeof c);
+                    A.n = n; A.price = price; A.age_ms = age; A.complete = complete; A.have = 1;
+                    snprintf(A.data_pair, sizeof A.data_pair, "%s", pair); A.data_tf = tf;
+                }
             } else { A.failed = 1; }
             free(b);
-        } else A.failed = 1;
+        } else { A.failed = 1; if (!g_conn) A.ip[0] = 0; }          /* the connection is gone: look the name up again next time */
         LeaveCriticalSection(&A.cs);
         PostMessage(A.hwnd, WM_DATA, 0, 0);
         WaitForSingleObject(A.wake, 1000);
@@ -277,7 +318,7 @@ static void paint(HDC dc, int S)
 
     EnterCriticalSection(&A.cs);
     char pair[24]; snprintf(pair, sizeof pair, "%s", A.pair);
-    int tf = A.tf, n = A.have && !strcmp(A.data_pair, pair) ? A.n : 0;
+    int tf = A.tf, n = A.have && !strcmp(A.data_pair, pair) && A.data_tf == A.tf ? A.n : 0;
     int failed = A.failed, have = A.have, complete = A.complete;
     double price = A.price, age = A.age_ms;
     static double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS];
@@ -455,12 +496,24 @@ static void tray_add(void)
 }
 static void tray_del(void) { NOTIFYICONDATAA nd; memset(&nd, 0, sizeof nd); nd.cbSize = sizeof nd; nd.hWnd = A.hwnd; nd.uID = ID_TRAY; Shell_NotifyIconA(NIM_DELETE, &nd); }
 
+/* what was last fetched for the pair and timeframe now chosen (under cs), or nothing; the next fetch replaces it a moment later */
+static void show_cached(void)
+{
+    A.have = 0; A.n = 0;
+    for (int i = 0; i < A.ncache; i++) if (A.cache[i].tf == A.tf && !strcmp(A.cache[i].pair, A.pair)) {
+        memcpy(A.o, A.cache[i].o, sizeof A.o); memcpy(A.h, A.cache[i].h, sizeof A.h); memcpy(A.l, A.cache[i].l, sizeof A.l); memcpy(A.c, A.cache[i].c, sizeof A.c);
+        A.n = A.cache[i].n; A.price = A.cache[i].price; A.age_ms = A.cache[i].age_ms; A.complete = A.cache[i].complete; A.have = 1;
+        snprintf(A.data_pair, sizeof A.data_pair, "%s", A.pair); A.data_tf = A.tf;
+        break;
+    }
+}
+
 static void change_pair(int dir)
 {
     EnterCriticalSection(&A.cs);
     int i = pair_index(A.pair), n = A.npairs;
     if (n > 0) { i = i < 0 ? 0 : (i + dir + n) % n; snprintf(A.pair, sizeof A.pair, "%s", A.pairs[i]); }
-    A.have = 0; A.n = 0;
+    show_cached();
     LeaveCriticalSection(&A.cs);
     wake(); InvalidateRect(A.hwnd, NULL, FALSE);
 }
@@ -468,7 +521,8 @@ static void change_pair(int dir)
 static void change_tf(int dir)
 {
     EnterCriticalSection(&A.cs);
-    A.tf = (A.tf + dir + NTF) % NTF; A.have = 0; A.n = 0;
+    A.tf = (A.tf + dir + NTF) % NTF;
+    show_cached();
     LeaveCriticalSection(&A.cs);
     wake(); InvalidateRect(A.hwnd, NULL, FALSE);
 }
@@ -585,6 +639,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
 {
     (void)hp; (void)cmd; (void)show;
     InitializeCriticalSection(&A.cs);
+    A.cache = calloc(40, sizeof *A.cache);
     ini_path();
     char buf[128];
     GetPrivateProfileStringA("candlewin", "server", "localhost:8766", buf, sizeof buf, A.ini); parse_server(buf);
