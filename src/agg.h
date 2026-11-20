@@ -22,7 +22,7 @@
 #define SERIES_CAP    600000          /* minutes kept: 416 days, enough for 60 weekly bars */
 #define MAX_BARS      500
 
-typedef struct { float o, h, l, c, v; unsigned char has; } Bar;
+typedef struct { float o, h, l, c, v; unsigned char has, real; } Bar;      /* real: made from at least one candle with trades, not only forward-filled ones */
 
 typedef struct {
     char            path[512];

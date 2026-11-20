@@ -36,7 +36,11 @@ int series_open(Series *s, const char *path, int cap)
 
 void series_close(Series *s) { if (s->db) sqlite3_close((sqlite3 *)s->db); s->db = NULL; free(s->bars); s->bars = NULL; pthread_mutex_destroy(&s->mu); pthread_mutex_destroy(&s->rmu); }
 
-/* put one finished minute (a local run of records) into the slot, before or after what is there */
+/*
+ * Put a minute, made from a run of records, into its slot, before or after what is there.  A bar made only of forward-filled candles (no trades: they repeat the
+ * last price) has a made-up open, high and low, so when trades come, in this call or a later one (the forming minute is built in many small steps), they replace
+ * those, as an exchange's candle opens at the first trade of the minute.
+ */
 static void merge(Series *s, int64_t minute, const Bar *b, int before)
 {
     int64_t i = minute - s->base_min;
@@ -49,10 +53,17 @@ static void merge(Series *s, int64_t minute, const Bar *b, int before)
     }
     Bar *d = &s->bars[i];
     if (!d->has) { *d = *b; return; }
-    if (b->h > d->h) d->h = b->h;
-    if (b->l < d->l) d->l = b->l;
-    d->v += b->v;
-    if (before) d->o = b->o; else d->c = b->c;
+    if (!before) {                                           /* b is later than what is there */
+        if (d->real && b->real) { if (b->h > d->h) d->h = b->h; if (b->l < d->l) d->l = b->l; d->c = b->c; d->v += b->v; }
+        else if (d->real) { d->c = b->c; }                   /* only fills: the price is unchanged */
+        else if (b->real) { d->o = b->o; d->h = b->h; d->l = b->l; d->c = b->c; d->v += b->v; d->real = 1; }   /* the first trades: they make the open, high and low */
+        else { d->c = b->c; }
+    } else {                                                 /* b is earlier than what is there */
+        if (d->real && b->real) { if (b->h > d->h) d->h = b->h; if (b->l < d->l) d->l = b->l; d->o = b->o; d->v += b->v; }
+        else if (d->real) { d->v += b->v; }                  /* earlier fills only: the open stays at the first trade */
+        else if (b->real) { d->o = b->o; d->h = b->h; d->l = b->l; d->v += b->v; d->real = 1; }
+        else { d->o = b->o; d->v += b->v; }
+    }
 }
 
 static int is_marker(const Rec *r) { return r->N == 0xFFFFFFFFu && r->V == -1.0f && r->J != r->J; }
@@ -138,9 +149,9 @@ static int64_t fold(Series *s, const unsigned char *b, const int64_t *offs, int6
         if (have && m != curmin) { merge(s, curmin, &cur, before); have = 0; }
         /* a forward-filled candle (no trade: N == 0) only repeats the last price: it must not become a minute's open, high or low, as an exchange's
          * candle opens at the first trade of the minute */
-        if (!have) { cur.o = r.O; cur.h = r.H; cur.l = r.L; cur.c = r.C; cur.v = r.V; cur.has = 1; curmin = m; have = 1; real = r.N != 0; }
+        if (!have) { cur.o = r.O; cur.h = r.H; cur.l = r.L; cur.c = r.C; cur.v = r.V; cur.has = 1; cur.real = r.N != 0; curmin = m; have = 1; real = r.N != 0; }
         else if (r.N == 0) { cur.c = r.C; }
-        else if (!real) { cur.o = r.O; cur.h = r.H; cur.l = r.L; cur.c = r.C; cur.v += r.V; real = 1; }
+        else if (!real) { cur.o = r.O; cur.h = r.H; cur.l = r.L; cur.c = r.C; cur.v += r.V; real = 1; cur.real = 1; }
         else { if (r.H > cur.h) cur.h = r.H; if (r.L < cur.l) cur.l = r.L; cur.c = r.C; cur.v += r.V; }
     }
     if (have) merge(s, curmin, &cur, before);
@@ -256,7 +267,7 @@ static int db_load(Series *s, int64_t lo, int64_t hi, int64_t *last_ts, float *l
             if (o > 0 && h > 0 && l > 0 && c > 0 && h >= mx * 0.9999 && l <= mn * 1.0001 && h <= mx * 3 && l >= mn / 3) {          /* believable */
                 int64_t ts = sqlite3_column_int64(st, 0);
                 Row *r = &rows[n++];
-                r->m = floor_div(ts, 60); r->b.o = (float)o; r->b.h = (float)h; r->b.l = (float)l; r->b.c = (float)c; r->b.v = (v >= 0 && v < 1e13) ? (float)v : 0; r->b.has = 1;
+                r->m = floor_div(ts, 60); r->b.o = (float)o; r->b.h = (float)h; r->b.l = (float)l; r->b.c = (float)c; r->b.v = (v >= 0 && v < 1e13) ? (float)v : 0; r->b.has = 1; r->b.real = 1;
                 total++;
                 if (last_ts && ts >= *last_ts) { *last_ts = ts; if (last_close_out) *last_close_out = (float)c; }
             }
@@ -361,7 +372,7 @@ static int bin_load(Series *s, int fd, int64_t from, int64_t to, int64_t *last_t
         double mx = o > c ? o : c, mn = o < c ? o : c;
         if (ts <= 0 || ts % 60 != 0 || !(o > 0 && h > 0 && l > 0 && c > 0) || h < mx * 0.9999 || l > mn * 1.0001 || h > mx * 3 || l < mn / 3) continue;      /* not a believable minute */
         Bar *b = slot_for(s, ts / 60);
-        if (b) { b->o = (float)o; b->h = (float)h; b->l = (float)l; b->c = (float)c; b->v = (v >= 0 && v < 1e13) ? (float)v : 0; b->has = 1; taken++; }
+        if (b) { b->o = (float)o; b->h = (float)h; b->l = (float)l; b->c = (float)c; b->v = (v >= 0 && v < 1e13) ? (float)v : 0; b->has = 1; b->real = 1; taken++; }
         if (last_ts && ts >= *last_ts) { *last_ts = ts; if (last_close_out) *last_close_out = (float)c; }
     }
     pthread_mutex_unlock(&s->mu);

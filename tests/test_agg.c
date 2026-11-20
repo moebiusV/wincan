@@ -396,8 +396,44 @@ static void check_marker_ms(void)
     series_close(&s); unlink(p);
 }
 
+/* the minute forming is built over many refreshes: when it begins quiet (forward-filled candles) and its first trades come in a later refresh, the open is the first trade */
+static void check_forming(void)
+{
+    const char *p = "/tmp/wincan-test10.bin"; unlink(p);
+    long long t0 = ((long long)time(NULL) / 60 - 5) * 60000LL;          /* a minute boundary some minutes ago */
+    FILE *f = fopen(p, "wb");
+    marker(f, t0);
+    for (int i = 0; i < 600; i++) { Rec r; r.O = r.H = r.L = r.C = 100; r.V = 1; r.J = 0; r.N = 1; frame(f, &r); }        /* minute 0: trades at 100 */
+    for (int i = 0; i < 40; i++) { Rec r; r.O = r.H = r.L = r.C = 100; r.V = 0; r.J = 0; r.N = 0; frame(f, &r); }          /* minute 1 begins quiet: fills at 100 */
+    fclose(f);
+    set_mtime(p, t0 + 640 * 100LL);
+    Series s; series_open(&s, p, 20000); series_tail(&s, 5000); while (series_history(&s, 400000)) ;
+    Out o; series_queryN((Series *[]){ &s }, 1, 1, 5, t0 + 640 * 100LL + 100, &o);
+    CHECK("forming: only fills so far, the bar is flat at the last price", o.n == 2 && fabs(o.o[1] - 100) < 1e-4 && fabs(o.h[1] - 100) < 1e-4 && fabs(o.l[1] - 100) < 1e-4);
+    /* the first trades arrive in a later refresh: 105 up to 106, and a low of 104 */
+    f = fopen(p, "ab");
+    for (int i = 0; i < 20; i++) { Rec r; r.O = 105; r.H = 106; r.L = 104; r.C = 105.5f; r.V = 2; r.J = 0; r.N = 3; frame(f, &r); }
+    fclose(f);
+    set_mtime(p, t0 + 660 * 100LL);
+    CHECK("forming: refresh", series_refresh(&s) == 0);
+    series_queryN((Series *[]){ &s }, 1, 1, 5, t0 + 660 * 100LL + 100, &o);
+    CHECK("forming: the open is the first trade, not the last price of the minute before", o.n == 2 && fabs(o.o[1] - 105) < 1e-4);
+    CHECK("forming: the low is not the fill", o.n == 2 && fabs(o.l[1] - 104) < 1e-4 && fabs(o.h[1] - 106) < 1e-4);
+    /* more fills, then more trades: nothing is disturbed */
+    f = fopen(p, "ab");
+    for (int i = 0; i < 10; i++) { Rec r; r.O = r.H = r.L = r.C = 105.5f; r.V = 0; r.J = 0; r.N = 0; frame(f, &r); }
+    for (int i = 0; i < 5; i++) { Rec r; r.O = 103; r.H = 103.5f; r.L = 102.5f; r.C = 103; r.V = 1; r.J = 0; r.N = 1; frame(f, &r); }
+    fclose(f);
+    set_mtime(p, t0 + 675 * 100LL);
+    series_refresh(&s);
+    series_queryN((Series *[]){ &s }, 1, 1, 5, t0 + 675 * 100LL + 100, &o);
+    CHECK("forming: the open stays, the low and the close follow", o.n == 2 && fabs(o.o[1] - 105) < 1e-4 && fabs(o.l[1] - 102.5) < 1e-4 && fabs(o.c[1] - 103) < 1e-4 && fabs(o.h[1] - 106) < 1e-4);
+    series_close(&s); unlink(p);
+}
+
 int main(void)
 {
+    check_forming();
     check_marker_ms();
     check_bins();
     check_database();

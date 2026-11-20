@@ -1,0 +1,20 @@
+Volume candles: the width rule measured from KuCoin's chart
+==========================================================
+
+Reference: a screenshot of KuCoin's ZECUSDT perpetual chart, 1-minute candles, volume candles on (the chart is TradingView's), at 2026-11-20 09:23 UTC.
+Method: every candle's high and low were taken from KuCoin's own klines for those minutes (kline/query, granularity 1), turned into pixel rows with the price
+axis of the screenshot (32 pixels to the dollar), the candle found in the picture by its wick, and its body width measured on the rows of its body.  Volume is
+the kline's volume in lots.
+
+Width of the body, in pixels, against the volume in lots (51 candles located):
+   width  7 : volumes 799 .. 2948, median 2129      (typical candles; never thinner)
+   width  9 : volumes 2886 .. 3349
+   width 11 : volumes 3807 .. 3971
+   width 15 : volume 5436
+   width 19 : volumes 8004 and 8228
+   widest runs in the picture: 24 pixels (the largest volume in view: 11991 lots)
+Volumes on show: median 2234, mean 2775, minimum 545, maximum 11991.
+
+A fit that matches the points:  width = standard * max(1, -0.92 + 1.907 * sqrt(volume / median volume on show)), as an odd number of pixels,
+capped near 3.6 times the standard width; the spacing of the candles is even and the wide ones overlap their neighbours.  The fit rests on few points: more
+reference screenshots (a quiet stretch, a very busy one, other zoom levels) would make it closer.

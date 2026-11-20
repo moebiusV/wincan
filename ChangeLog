@@ -10,3 +10,4 @@
 2026-11-20  candled --db (a candle database candles, authoritative but for the live edge; bounded queries); figures as KuCoin's; the server's address cached in wincan.ini.
 2026-11-20  candled --live-bins (the websocket daemon's closed minutes: database, then bins, then ticks); the price and age from the freshest source; the forming candle drawn like the others.
 2026-11-20  Volume candles toggle; ticks only for the candle forming; markers with milliseconds (reader side).
+2026-11-20  Volume candle width: KuCoin's rule, measured; forming minute's open fixed (merge of forward-filled candles across refreshes).

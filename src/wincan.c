@@ -534,19 +534,28 @@ static void paint(HDC dc, int W, int H)
         int step = dn > 0 ? cw / dn : 4; if (step < 2) step = 2;
         int bw = step - 1; if (bw % 2 == 0) bw--; if (bw < 1) bw = 1;       /* a body of an odd width has a middle pixel for the wick */
         int x0 = U(4) + (cw - step * dn);                        /* the newest bar at the right */
-        /* where each bar goes: standard candles are as wide as each other; volume candles have a width in proportion to their volume (a pixel at least) */
+        /* where each bar goes: the slots are evenly spaced; standard candles are all as wide as each other.  Volume candles are drawn as KuCoin's chart draws them, a rule
+         * measured from its screenshot against the real volumes of the minutes (ZEC, 1 minute, candles 7 pixels wide at typical volume):
+         *     volume / median     0.4..1.0   1.4   2.0    3.6    5.4
+         *     width / standard       1.0     1.3   1.8    2.6    3.4        (widths 7, 9, 11-12, 19, 24 pixels)
+         * which is  max(1, -0.92 + 1.907 * sqrt(volume / median volume on show)), as an odd number of pixels, never thinner than the standard width, and the wide
+         * candles overlap their neighbours (the later is drawn over the earlier). */
         static int xl[MAX_BARS], cxs[MAX_BARS], bwid[MAX_BARS];
-        double vsum = 0; for (int i = base; i < n; i++) vsum += v[i] > 0 ? v[i] : 0;
-        if (A.ind[3] && vsum > 0) {
-            double cum = 0;
-            for (int i = base; i < n; i++) {
-                int xa = U(4) + (int)(cw * cum / vsum + 0.5); cum += v[i] > 0 ? v[i] : 0; int xb = U(4) + (int)(cw * cum / vsum + 0.5);
-                int wd = xb - xa; if (wd < 1) wd = 1;
-                int bwi = wd >= 3 ? wd - 1 : wd; if (bwi > 1 && bwi % 2 == 0) bwi--;       /* a pixel of gap where there is room; odd, for the wick */
-                bwid[i] = bwi; xl[i] = xa + (wd - bwi) / 2; cxs[i] = xl[i] + bwi / 2;
+        double vmed = 0; int vcount = 0;
+        { static double tmp[MAX_BARS];
+          for (int i = base; i < n; i++) if (v[i] > 0) tmp[vcount++] = v[i];
+          for (int i = 1; i < vcount; i++) { double x = tmp[i]; int j = i - 1; while (j >= 0 && tmp[j] > x) { tmp[j + 1] = tmp[j]; j--; } tmp[j + 1] = x; }
+          vmed = vcount ? tmp[vcount / 2] : 0; }
+        for (int i = base; i < n; i++) {
+            int slot = x0 + (i - base) * step, wd = bw;
+            if (A.ind[3] && vmed > 0 && v[i] > 0) {
+                double f = -0.92 + 1.907 * sqrt(v[i] / vmed);
+                if (f < 1.0) f = 1.0;
+                if (f > 3.6) f = 3.6;
+                wd = (int)(bw * f + 0.5); if (wd < bw) wd = bw;
+                if (wd % 2 == 0) wd++;                                               /* odd, for the wick in the middle */
             }
-        } else {
-            for (int i = base; i < n; i++) { xl[i] = x0 + (i - base) * step; bwid[i] = bw; cxs[i] = xl[i] + bw / 2; }
+            bwid[i] = wd; xl[i] = slot + (bw - wd) / 2; cxs[i] = xl[i] + wd / 2;
         }
         HRGN clip = CreateRectRgn(0, top, W, bot); SelectClipRgn(dc, clip);          /* the lines stay in the chart */
         #define LINE(arr, okarr, col, style) do { HPEN pn = CreatePen(style, 1, col); HGDIOBJ op = SelectObject(dc, pn); int started = 0; \
