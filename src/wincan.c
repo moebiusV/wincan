@@ -488,7 +488,7 @@ static void paint(HDC dc, int W, int H)
     double u = W / (double)BASE_W;                         /* scale factor */
     #define U(v) ((int)((v) * u + 0.5))
     rect(dc, 0, 0, W, H, COL_BG);
-    HFONT fb = font(U(13), 1), fn = font(U(11), 0), fs = font(U(9), 0), fp = font(U(15), 1);
+    HFONT fb = font(U(13), 1), fn = font(U(11), 0), fs = font(U(9), 0), fp = font(U(15), 1), fx = font(U(12), 1);      /* fx: the high and low labels (the author, 2026-11-20: too small and faint to read) */
 
     EnterCriticalSection(&A.cs);
     char pair[24]; snprintf(pair, sizeof pair, "%s", A.pair);
@@ -585,13 +585,13 @@ static void paint(HDC dc, int W, int H)
         for (int i = base + 1; i < n; i++) { if (h[i] > h[ihi]) ihi = i; if (l[i] < l[ilo]) ilo = i; }
         for (int k = 0; k < 2; k++) {
             int idx = k == 0 ? ihi : ilo, yy = Y(k == 0 ? h[idx] : l[idx]), xs = U(4);
-            HPEN pen = CreatePen(PS_DOT, 1, RGB(100, 112, 128)); HGDIOBJ old = SelectObject(dc, pen);
+            HPEN pen = CreatePen(PS_DOT, 1, RGB(140, 152, 168)); HGDIOBJ old = SelectObject(dc, pen);
             SetBkMode(dc, TRANSPARENT); MoveToEx(dc, xs, yy, NULL); LineTo(dc, W - U(2), yy); SelectObject(dc, old); DeleteObject(pen);
             fmt_price(k == 0 ? h[idx] : l[idx], buf, sizeof buf);
-            int ty = k == 0 ? yy - U(11) : yy + U(1);
+            int ty = k == 0 ? yy - U(15) : yy + U(1);
             if (ty < top - U(2)) ty = yy + U(1);                                  /* no room above: below the line */
-            if (ty > bot - U(9)) ty = yy - U(11);                                 /* no room below: above it */
-            text(dc, fs, RGB(150, 162, 178), U(5), ty, buf, 0);
+            if (ty > bot - U(13)) ty = yy - U(15);                                /* no room below: above it */
+            text(dc, fx, RGB(232, 238, 244), U(5), ty, buf, 0);
         }
         /* the line of the price now, in the colour of the candle that is forming */
         double mx = c[n - 1]; int ypl = Y(mx);
@@ -664,7 +664,7 @@ static void paint(HDC dc, int W, int H)
         HPEN pen = CreatePen(PS_SOLID, 1, RGB(70, 130, 200)); HGDIOBJ oldp = SelectObject(dc, pen), oldb = SelectObject(dc, GetStockObject(NULL_BRUSH));
         Rectangle(dc, 0, 0, W, H); SelectObject(dc, oldp); SelectObject(dc, oldb); DeleteObject(pen);
     }
-    DeleteObject(fb); DeleteObject(fn); DeleteObject(fs); DeleteObject(fp);
+    DeleteObject(fb); DeleteObject(fn); DeleteObject(fs); DeleteObject(fp); DeleteObject(fx); DeleteObject(fx);
     #undef U
     #undef Y
 }
