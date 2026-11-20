@@ -14,3 +14,4 @@
 2026-11-20  Volume candle width: log law against the mean volume, fitted on two KuCoin screenshots.
 2026-11-20  Official final candles replace closed minutes; the price and age never come from them (it froze the price); mark price for the P&L.
 2026-11-20  P&L in dollars always shown with cents.
+2026-11-20  Official candles: the last three closed minutes are fetched every three seconds and put in whenever seen, no timing assumed.

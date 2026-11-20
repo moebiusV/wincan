@@ -30,7 +30,7 @@
 static const char *dir = ".", *dir2 = NULL, *dbpath = NULL, *binsdir = NULL;      /* the files of the live collector, the backfill files (spot), and the database whose candles table is authoritative */
 /* the sources of a coin, in order: the live files (100 ms ticks), the database, the websocket daemon's bins (closed minutes), the backfill files */
 #define NSRC 5
-typedef struct { char name[24]; Series s[NSRC]; int has[NSRC]; time_t checked; volatile int64_t last_req_ms, last_refresh_ms; int64_t rest_min; int rest_final; volatile double mark; volatile int64_t mark_ms; } Coin;
+typedef struct { char name[24]; Series s[NSRC]; int has[NSRC]; time_t checked; volatile int64_t last_req_ms, last_refresh_ms; volatile int64_t rest_ms; volatile double mark; volatile int64_t mark_ms; } Coin;
 static int rest_enabled;
 static char dbnames[MAX_PAIRS][24]; static int ndbnames; static pthread_mutex_t dbnames_mu = PTHREAD_MUTEX_INITIALIZER;
 static Coin coins[MAX_PAIRS];
@@ -238,8 +238,9 @@ static void fetch_mark(Coin *c, CURL *curl)
 }
 
 /*
- * The exchange's official candle of a minute replaces what was made of ticks and files as soon as it can be had.  For the pairs being watched: one second after a
- * minute has closed, and again three seconds later (a candle can still change a little at the close); a pair that was not watched is fetched once, at once, when it is.
+ * The exchange's official candle of a minute replaces what was built, whenever it can be had.  For a pair someone is looking at, the last three closed minutes are
+ * fetched every three seconds (the minute still forming never: it is not final), and whatever the exchange has then is put in; a fetch that failed is tried again a
+ * second later.  There is no timing to get right: an official candle that arrives late, or is revised, is put in when it is seen.
  */
 static void *official_thread(void *arg)
 {
@@ -249,18 +250,14 @@ static void *official_thread(void *arg)
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "candled");
     for (;;) {
         struct timespec ts = { 0, 250 * 1000000L }; nanosleep(&ts, NULL);
-        int64_t t = now_ms(), cur = t / 60000, closed = cur - 1;        /* the minute that has just closed */
-        double into = (double)(t - cur * 60000) / 1000.0;               /* seconds since it closed */
+        int64_t t = now_ms(), cur = t / 60000;
         for (int i = 0; i < ncoins; i++) {
             Coin *c = &coins[i];
             if (!c->has[4] || t - c->last_req_ms >= 5000) continue;     /* only a pair someone is looking at */
             if (t - c->mark_ms >= 1000) fetch_mark(c, curl);            /* its mark price, every second */
-            if (c->rest_min != closed && into >= 1.0) {
-                fetch_official(c, curl, (closed - 2) * 60, (closed + 1) * 60, cur);
-                c->rest_min = closed; c->rest_final = into >= 4.0;
-            } else if (c->rest_min == closed && !c->rest_final && into >= 4.0) {
-                fetch_official(c, curl, (closed - 1) * 60, (closed + 1) * 60, cur);
-                c->rest_final = 1;
+            if (t - c->rest_ms >= 3000) {
+                int got = fetch_official(c, curl, (cur - 3) * 60, cur * 60, cur);
+                c->rest_ms = got > 0 ? t : t - 2000;                    /* nothing came: again in a second */
             }
         }
     }
