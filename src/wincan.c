@@ -535,25 +535,22 @@ static void paint(HDC dc, int W, int H)
         int bw = step - 1; if (bw % 2 == 0) bw--; if (bw < 1) bw = 1;       /* a body of an odd width has a middle pixel for the wick */
         int x0 = U(4) + (cw - step * dn);                        /* the newest bar at the right */
         /* where each bar goes: the slots are evenly spaced; standard candles are all as wide as each other.  Volume candles are drawn as KuCoin's chart draws them, a rule
-         * measured from its screenshot against the real volumes of the minutes (ZEC, 1 minute, candles 7 pixels wide at typical volume):
-         *     volume / median     0.4..1.0   1.4   2.0    3.6    5.4
-         *     width / standard       1.0     1.3   1.8    2.6    3.4        (widths 7, 9, 11-12, 19, 24 pixels)
-         * which is  max(1, -0.92 + 1.907 * sqrt(volume / median volume on show)), as an odd number of pixels, never thinner than the standard width, and the wide
-         * candles overlap their neighbours (the later is drawn over the earlier). */
+         * measured from two screenshots of its chart against the real volumes of the minutes (volume-candles.txt): no candle is thinner than standard (7 pixels there); the
+         * width starts to grow at the mean volume on show and grows with the logarithm of the volume, in an odd number of pixels:
+         *     width / standard = max(1, 1.10 + 1.57 * ln(volume / mean volume))        (about 7.7 + 11 ln(volume / mean) pixels where the standard is 7)
+         * The wide candles overlap their neighbours (the later is drawn over the earlier). */
         static int xl[MAX_BARS], cxs[MAX_BARS], bwid[MAX_BARS];
-        double vmed = 0; int vcount = 0;
-        { static double tmp[MAX_BARS];
-          for (int i = base; i < n; i++) if (v[i] > 0) tmp[vcount++] = v[i];
-          for (int i = 1; i < vcount; i++) { double x = tmp[i]; int j = i - 1; while (j >= 0 && tmp[j] > x) { tmp[j + 1] = tmp[j]; j--; } tmp[j + 1] = x; }
-          vmed = vcount ? tmp[vcount / 2] : 0; }
+        double vmean = 0; int vcount = 0;
+        for (int i = base; i < n; i++) if (v[i] > 0) { vmean += v[i]; vcount++; }
+        vmean = vcount ? vmean / vcount : 0;
         for (int i = base; i < n; i++) {
             int slot = x0 + (i - base) * step, wd = bw;
-            if (A.ind[3] && vmed > 0 && v[i] > 0) {
-                double f = -0.92 + 1.907 * sqrt(v[i] / vmed);
+            if (A.ind[3] && vmean > 0 && v[i] > 0) {
+                double f = 1.10 + 1.57 * log(v[i] / vmean);
                 if (f < 1.0) f = 1.0;
-                if (f > 3.6) f = 3.6;
-                wd = (int)(bw * f + 0.5); if (wd < bw) wd = bw;
-                if (wd % 2 == 0) wd++;                                               /* odd, for the wick in the middle */
+                if (f > 4.0) f = 4.0;
+                wd = 2 * (int)(((bw * f) - 1.0) / 2.0 + 0.5) + 1;                    /* the nearest odd number of pixels: the wick is in the middle */
+                if (wd < bw) wd = bw;
             }
             bwid[i] = wd; xl[i] = slot + (bw - wd) / 2; cxs[i] = xl[i] + wd / 2;
         }

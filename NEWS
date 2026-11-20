@@ -18,3 +18,4 @@ wincan 0.1.0 (2026-11-20)
   candled --live-bins DIR reads the websocket daemon's one-minute files: for closed minutes the order is the database, the exchange's own candles from those files, then the ticks (which come first only for the last two minutes).
   A fourth toggle dot switches between standard candles and volume candles (width in proportion to volume).  The ticks are used only for the candle still forming; the collector's markers carry milliseconds, so the open of the forming candle is closer to the exchange's.
   Volume candles follow the width rule measured from KuCoin's own chart (never thinner than standard; max(1, -0.92 + 1.907 sqrt(volume/median)) times the standard width; overlapping), not a guessed cap.
+  Volume candles: the width rule refitted on a second KuCoin screenshot (88 candles): logarithmic against the mean volume.

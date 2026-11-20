@@ -15,6 +15,17 @@ Width of the body, in pixels, against the volume in lots (51 candles located):
    widest runs in the picture: 24 pixels (the largest volume in view: 11991 lots)
 Volumes on show: median 2234, mean 2775, minimum 545, maximum 11991.
 
-A fit that matches the points:  width = standard * max(1, -0.92 + 1.907 * sqrt(volume / median volume on show)), as an odd number of pixels,
-capped near 3.6 times the standard width; the spacing of the candles is even and the wide ones overlap their neighbours.  The fit rests on few points: more
-reference screenshots (a quiet stretch, a very busy one, other zoom levels) would make it closer.
+A first fit, on this screenshot alone, was a square-root law against the median volume.
+
+A second screenshot (ZECUSDT perpetual, 1 minute, volume candles, 2026-11-20 10:17 UTC; the candles located by their wicks against KuCoin's klines, the price
+axis calibrated by search to 21.25 pixels to the dollar) gave 37 more candles:
+   width  7 : 29 candles, volumes 918 .. 2855
+   width  9 : 3094       width 11 : 3635       width 15 : 5017, 5084, 5563       width 19 : 7976       width 23 : 11455 (the largest in view)
+The two agree with each other, and the step from 7 to 9 comes at 2870 lots, between 2855 (width 7) and 2886 (width 9).  The mean volume on show was 2690 .. 2830 in
+the two, so the width starts to grow at about the mean volume; and it grows with the logarithm of the volume, not with a power: from 3635 to 5084 to 7976 to 11455 lots
+(ratios of 1.4, 1.6, 1.4) the width goes up by 4 pixels each time.
+
+The rule now used (88 candles located in all, widths within the odd-number quantisation of KuCoin's):
+      width / standard = max(1, 1.10 + 1.57 * ln(volume / mean volume on show))      as an odd number of pixels
+i.e. about 7.7 + 11 ln(volume / mean) pixels where the standard is 7 pixels; it reaches 3.4 times the standard width at 4.3 times the mean volume.  The spacing of the
+candles is even and the wide ones overlap their neighbours.  More reference screenshots (other pairs, zoom levels, a quiet stretch) would make it closer still.
