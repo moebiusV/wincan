@@ -54,14 +54,14 @@ static struct {
     Position pos[MAX_PAIRS];              /* by index in pairs[] */
     /* data (under cs) */
     CRITICAL_SECTION cs;
-    int    n; double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS];
+    int    n; double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS], v[MAX_BARS];
     double price; double age_ms; int complete, have, failed;
     char   data_pair[24]; int data_tf;
-    struct { char pair[24]; int tf, n, complete, need_full; double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS], price, age_ms; DWORD when, full_when; char sig[24]; } *cache; int ncache;      /* every timeframe looked at is kept, so going back to one is instant */
+    struct { char pair[24]; int tf, n, complete, need_full; double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS], v[MAX_BARS], price, age_ms; DWORD when, full_when; char sig[24]; } *cache; int ncache;      /* every timeframe looked at is kept, so going back to one is instant */
     char   ip[64];                       /* the server's address, found once: resolving a .local name takes a third of a second */
     HANDLE wake; volatile int quit;
     /* ui */
-    int    ind[3], hover;                 /* indicators on/off: Bollinger bands, 9 MA, 200 MA; the dot the mouse is over (-1: none) */
+    int    ind[4], hover;                 /* the toggles on/off: Bollinger bands, 9 MA, 200 MA, volume candles; the dot the mouse is over (-1: none) */
     int    active, dragging, editing, tracking, hidden;   /* editing: the position editor is open */
     int    field_last;                    /* the box last edited: e resumes there (kept in the settings) */
     int    field, fresh[4];                /* the box being typed in (0 entry price, 1 amount, 2 leverage, 3 realized P&L); a box's first key replaces what it held */
@@ -130,6 +130,7 @@ static void save_all(void)
     WritePrivateProfileStringA("wincan", "bollinger", A.ind[0] ? "1" : "0", A.ini);
     WritePrivateProfileStringA("wincan", "ma9", A.ind[1] ? "1" : "0", A.ini);
     WritePrivateProfileStringA("wincan", "ma200", A.ind[2] ? "1" : "0", A.ini);
+    WritePrivateProfileStringA("wincan", "volcandles", A.ind[3] ? "1" : "0", A.ini);
     snprintf(b, sizeof b, "%s:%d", A.host, A.port); WritePrivateProfileStringA("wincan", "server", b, A.ini);
     RECT r;
     if (A.hwnd && !A.shot && GetWindowRect(A.hwnd, &r)) {
@@ -340,7 +341,7 @@ static DWORD WINAPI worker(LPVOID arg)
     (void)arg;
     DWORD last_pairs = 0;
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
-    static double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS];
+    static double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS], v[MAX_BARS];
     while (!A.quit) {
         if (!A.ip[0]) resolve();          /* the address is looked up only when none is known (it is kept in the settings) and after a failure */
         DWORD now = GetTickCount();
@@ -372,6 +373,7 @@ static DWORD WINAPI worker(LPVOID arg)
             } else {
                 int n = get_arr(b, "t", t, MAX_BARS);
                 if (n > 0 && get_arr(b, "o", o, MAX_BARS) == n && get_arr(b, "h", h, MAX_BARS) == n && get_arr(b, "l", l, MAX_BARS) == n && get_arr(b, "c", c, MAX_BARS) == n) {
+                    if (get_arr(b, "v", v, MAX_BARS) != n) for (int q = 0; q < n; q++) v[q] = 0;               /* no volumes: the volume candles are then the standard ones */
                     if (slot < 0) {
                         if (A.ncache < 40) slot = A.ncache++;
                         else { slot = 0; for (int i = 1; i < A.ncache; i++) if (A.cache[i].when < A.cache[slot].when) slot = i; }       /* the oldest goes */
@@ -387,14 +389,14 @@ static DWORD WINAPI worker(LPVOID arg)
                             if (k < 0) {
                                 if (t[j] > A.cache[slot].t[cn - 1]) {
                                     if (t[j] - A.cache[slot].t[cn - 1] > step * 1.5 + 60) { A.cache[slot].need_full = 1; continue; }
-                                    if (cn >= MAX_BARS) { memmove(A.cache[slot].t, A.cache[slot].t + 1, sizeof(double) * (MAX_BARS - 1)); memmove(A.cache[slot].o, A.cache[slot].o + 1, sizeof(double) * (MAX_BARS - 1)); memmove(A.cache[slot].h, A.cache[slot].h + 1, sizeof(double) * (MAX_BARS - 1)); memmove(A.cache[slot].l, A.cache[slot].l + 1, sizeof(double) * (MAX_BARS - 1)); memmove(A.cache[slot].c, A.cache[slot].c + 1, sizeof(double) * (MAX_BARS - 1)); cn--; }
+                                    if (cn >= MAX_BARS) { memmove(A.cache[slot].t, A.cache[slot].t + 1, sizeof(double) * (MAX_BARS - 1)); memmove(A.cache[slot].o, A.cache[slot].o + 1, sizeof(double) * (MAX_BARS - 1)); memmove(A.cache[slot].h, A.cache[slot].h + 1, sizeof(double) * (MAX_BARS - 1)); memmove(A.cache[slot].l, A.cache[slot].l + 1, sizeof(double) * (MAX_BARS - 1)); memmove(A.cache[slot].c, A.cache[slot].c + 1, sizeof(double) * (MAX_BARS - 1)); memmove(A.cache[slot].v, A.cache[slot].v + 1, sizeof(double) * (MAX_BARS - 1)); cn--; }
                                     k = cn; A.cache[slot].n = cn + 1;
                                 } else continue;
                             }
-                            A.cache[slot].t[k] = t[j]; A.cache[slot].o[k] = o[j]; A.cache[slot].h[k] = h[j]; A.cache[slot].l[k] = l[j]; A.cache[slot].c[k] = c[j];
+                            A.cache[slot].t[k] = t[j]; A.cache[slot].o[k] = o[j]; A.cache[slot].h[k] = h[j]; A.cache[slot].l[k] = l[j]; A.cache[slot].c[k] = c[j]; A.cache[slot].v[k] = v[j];
                         }
                     } else {
-                        memcpy(A.cache[slot].t, t, sizeof t); memcpy(A.cache[slot].o, o, sizeof o); memcpy(A.cache[slot].h, h, sizeof h); memcpy(A.cache[slot].l, l, sizeof l); memcpy(A.cache[slot].c, c, sizeof c);
+                        memcpy(A.cache[slot].t, t, sizeof t); memcpy(A.cache[slot].o, o, sizeof o); memcpy(A.cache[slot].h, h, sizeof h); memcpy(A.cache[slot].l, l, sizeof l); memcpy(A.cache[slot].c, c, sizeof c); memcpy(A.cache[slot].v, v, sizeof v);
                         A.cache[slot].n = n; A.cache[slot].need_full = 0; A.cache[slot].full_when = GetTickCount();
                     }
                     snprintf(A.cache[slot].sig, sizeof A.cache[slot].sig, "%s", nsig);
@@ -471,8 +473,8 @@ static void rect(HDC dc, int x0, int y0, int x1, int y1, COLORREF c)
 #define COL_BB    RGB(170, 120, 230)
 #define COL_MA9   RGB(255, 160, 40)
 #define COL_MA200 RGB(70, 200, 240)
-static const COLORREF IND_COL[3] = { COL_BB, COL_MA9, COL_MA200 };
-static const char *IND_NAME[3] = { "Bollinger bands (20, 2)", "9-period moving average", "200-period moving average" };
+static const COLORREF IND_COL[4] = { COL_BB, COL_MA9, COL_MA200, RGB(205, 205, 215) };
+static const char *IND_NAME[4] = { "Bollinger bands (20, 2)", "9-period moving average", "200-period moving average", "Volume candles (width = volume)" };
 
 /* the centre of the dot of an indicator, and its radius, in a window W by H at the factor u */
 static void dot_pos(int k, int W, int H, double u, int *cx, int *cy, int *r) { *cx = W - (int)(14 * u) - k * (int)(13 * u); *cy = H - (int)(8 * u); *r = (int)(3.5 * u + 0.5); }
@@ -489,8 +491,8 @@ static void paint(HDC dc, int W, int H)
     int tf = A.tf, n = A.have && !strcmp(A.data_pair, pair) && A.data_tf == A.tf ? A.n : 0;
     int failed = A.failed, have = A.have, complete = A.complete;
     double price = A.price, age = A.age_ms;
-    static double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS];
-    memcpy(o, A.o, sizeof o); memcpy(h, A.h, sizeof h); memcpy(l, A.l, sizeof l); memcpy(c, A.c, sizeof c); (void)t;
+    static double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS], v[MAX_BARS];
+    memcpy(o, A.o, sizeof o); memcpy(h, A.h, sizeof h); memcpy(l, A.l, sizeof l); memcpy(c, A.c, sizeof c); memcpy(v, A.v, sizeof v); (void)t;
     LeaveCriticalSection(&A.cs);
     Position pos = *cur_pos();
     char buf[96], buf2[160];
@@ -532,9 +534,23 @@ static void paint(HDC dc, int W, int H)
         int step = dn > 0 ? cw / dn : 4; if (step < 2) step = 2;
         int bw = step - 1; if (bw % 2 == 0) bw--; if (bw < 1) bw = 1;       /* a body of an odd width has a middle pixel for the wick */
         int x0 = U(4) + (cw - step * dn);                        /* the newest bar at the right */
+        /* where each bar goes: standard candles are as wide as each other; volume candles have a width in proportion to their volume (a pixel at least) */
+        static int xl[MAX_BARS], cxs[MAX_BARS], bwid[MAX_BARS];
+        double vsum = 0; for (int i = base; i < n; i++) vsum += v[i] > 0 ? v[i] : 0;
+        if (A.ind[3] && vsum > 0) {
+            double cum = 0;
+            for (int i = base; i < n; i++) {
+                int xa = U(4) + (int)(cw * cum / vsum + 0.5); cum += v[i] > 0 ? v[i] : 0; int xb = U(4) + (int)(cw * cum / vsum + 0.5);
+                int wd = xb - xa; if (wd < 1) wd = 1;
+                int bwi = wd >= 3 ? wd - 1 : wd; if (bwi > 1 && bwi % 2 == 0) bwi--;       /* a pixel of gap where there is room; odd, for the wick */
+                bwid[i] = bwi; xl[i] = xa + (wd - bwi) / 2; cxs[i] = xl[i] + bwi / 2;
+            }
+        } else {
+            for (int i = base; i < n; i++) { xl[i] = x0 + (i - base) * step; bwid[i] = bw; cxs[i] = xl[i] + bw / 2; }
+        }
         HRGN clip = CreateRectRgn(0, top, W, bot); SelectClipRgn(dc, clip);          /* the lines stay in the chart */
         #define LINE(arr, okarr, col, style) do { HPEN pn = CreatePen(style, 1, col); HGDIOBJ op = SelectObject(dc, pn); int started = 0; \
-            for (int i = base; i < n; i++) { if (!okarr[i]) { started = 0; continue; } int px = x0 + (i - base) * step + bw / 2, py = Y(arr[i]); \
+            for (int i = base; i < n; i++) { if (!okarr[i]) { started = 0; continue; } int px = cxs[i], py = Y(arr[i]); \
                 if (!started) { MoveToEx(dc, px, py, NULL); started = 1; } else LineTo(dc, px, py); } \
             SelectObject(dc, op); DeleteObject(pn); } while (0)
         if (A.ind[0]) { LINE(bbu, okbb, COL_BB, PS_SOLID); LINE(bbl, okbb, COL_BB, PS_SOLID); LINE(bbm, okbb, RGB(110, 80, 150), PS_SOLID); }
@@ -543,8 +559,7 @@ static void paint(HDC dc, int W, int H)
         SelectClipRgn(dc, NULL); DeleteObject(clip);
         for (int i = base; i < n; i++) {
             COLORREF col = c[i] >= o[i] ? COL_UP : COL_DOWN;                          /* every candle alike: the one forming is drawn as the others */
-            int xs = x0 + (i - base) * step, cx = xs + bw / 2;                        /* the middle pixel of the slot's body */
-            int x = xs, w = bw;
+            int cx = cxs[i], x = xl[i], w = bwid[i];                                  /* the middle pixel of the body, for the wick */
             rect(dc, cx, Y(h[i]), cx + 1, Y(l[i]) + 1, col);
             int yo = Y(o[i]), yc = Y(c[i]); if (yo > yc) { int tmp = yo; yo = yc; yc = tmp; }
             rect(dc, x, yo, x + w, yc + 1 > yo + 1 ? yc + 1 : yo + 1, col);
@@ -608,6 +623,7 @@ static void paint(HDC dc, int W, int H)
             if (pos.have_range) { double mfe, mae, a1, a2; excursions(&pos, pos.hi > price ? pos.hi : price, pos.lo < price ? pos.lo : price, &mfe, &mae, &a1, &a2);
                 snprintf(buf2, sizeof buf2, "%.6g @ %s%s%s  best %+.1f%% worst %+.1f%%", pos.size, buf, lv, rl, mfe, mae); }
             else snprintf(buf2, sizeof buf2, "%.6g @ %s%s%s", pos.size, buf, lv, rl);
+            if (strlen(buf2) > 46) snprintf(buf2, sizeof buf2, "%.6g @ %s%s%s", pos.size, buf, lv, rl);       /* the dots take the right end of the line: the best and worst go if it would run into them */
             text(dc, fs, COL_DIM, U(6), fy + U(22), buf2, 0);
         }
     } else if (A.last.valid && GetTickCount() - A.last.when < 30000 && !strcmp(A.last.pair, pair)) {      /* the trade just closed */
@@ -620,16 +636,16 @@ static void paint(HDC dc, int W, int H)
         text(dc, fn, COL_DIM, U(6), fy + U(4), "no position", 0);
         text(dc, fs, COL_DIM, U(6), fy + U(22), A.active ? "e enter a position   q quit" : "click, then e to enter a position", 0);
     }
-    for (int k = 0; k < 3; k++) {                                /* the toggles: a filled dot is on, a ring is off */
+    for (int k = 0; k < 4; k++) {                                /* the toggles: a filled dot is on, a ring is off */
         int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r);
         HBRUSH br = A.ind[k] ? CreateSolidBrush(IND_COL[k]) : (HBRUSH)GetStockObject(NULL_BRUSH);
         HPEN pn = CreatePen(PS_SOLID, 1, IND_COL[k]); HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, pn);
         Ellipse(dc, cx - r, cy - r, cx + r + 1, cy + r + 1);
         SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(pn); if (A.ind[k]) DeleteObject(br);
     }
-    if (A.hover >= 0 && A.hover < 3) {                           /* the label of the dot the mouse is on */
+    if (A.hover >= 0 && A.hover < 4) {                           /* the label of the dot the mouse is on */
         char lab[64]; snprintf(lab, sizeof lab, "%s: %s", IND_NAME[A.hover], A.ind[A.hover] ? "on" : "off");
-        int cx, cy, r; dot_pos(2, W, H, u, &cx, &cy, &r);
+        int cx, cy, r; dot_pos(3, W, H, u, &cx, &cy, &r);
         rect(dc, W / 3, H - U(17), cx - U(8), H - U(2), COL_BG);
         text(dc, fs, IND_COL[A.hover], cx - U(10), H - U(16), lab, 1);
     }
@@ -745,7 +761,7 @@ static void show_cached(void)
 {
     A.have = 0; A.n = 0;
     for (int i = 0; i < A.ncache; i++) if (A.cache[i].tf == A.tf && !strcmp(A.cache[i].pair, A.pair)) {
-        memcpy(A.o, A.cache[i].o, sizeof A.o); memcpy(A.h, A.cache[i].h, sizeof A.h); memcpy(A.l, A.cache[i].l, sizeof A.l); memcpy(A.c, A.cache[i].c, sizeof A.c);
+        memcpy(A.o, A.cache[i].o, sizeof A.o); memcpy(A.h, A.cache[i].h, sizeof A.h); memcpy(A.l, A.cache[i].l, sizeof A.l); memcpy(A.c, A.cache[i].c, sizeof A.c); memcpy(A.v, A.cache[i].v, sizeof A.v);
         A.n = A.cache[i].n; A.price = A.cache[i].price; A.age_ms = A.cache[i].age_ms; A.complete = A.cache[i].complete; A.have = 1;
         snprintf(A.data_pair, sizeof A.data_pair, "%s", A.pair); A.data_tf = A.tf;
         break;
@@ -830,7 +846,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_MOUSEACTIVATE: return A.active ? MA_ACTIVATE : MA_NOACTIVATE;
     case WM_LBUTTONDOWN: {
         int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = win_w(), H = win_h(); double u = W / (double)BASE_W;
-        for (int k = 0; k < 3; k++) {                                          /* a click on a dot toggles it */
+        for (int k = 0; k < 4; k++) {                                          /* a click on a dot toggles it */
             int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r);
             if (abs(mx - cx) <= r + 3 && abs(my - cy) <= r + 3) { A.ind[k] = !A.ind[k]; save_all(); InvalidateRect(h, NULL, FALSE); return 0; }
         }
@@ -851,7 +867,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         return 0; }
     case WM_MOUSEMOVE: {
         int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = win_w(), H = win_h(), hv = -1; double u = W / (double)BASE_W;
-        for (int k = 0; k < 3; k++) { int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r); if (abs(mx - cx) <= r + 3 && abs(my - cy) <= r + 3) hv = k; }
+        for (int k = 0; k < 4; k++) { int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r); if (abs(mx - cx) <= r + 3 && abs(my - cy) <= r + 3) hv = k; }
         if (hv != A.hover) { A.hover = hv; InvalidateRect(h, NULL, FALSE); }
         }
         if (!A.tracking) { TRACKMOUSEEVENT te = { sizeof te, TME_LEAVE, h, 0 }; TrackMouseEvent(&te); A.tracking = 1; }
@@ -940,7 +956,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     A.tf = 2; for (int i = 0; i < NTF; i++) if (!strcmp(tfs, TFS[i])) A.tf = i;
     { char ipb[64] = "", forb[200] = "", now_sv[200]; GetPrivateProfileStringA("wincan", "serverip", "", ipb, sizeof ipb, A.ini); GetPrivateProfileStringA("wincan", "serverip_for", "", forb, sizeof forb, A.ini);
       snprintf(now_sv, sizeof now_sv, "%s:%d", A.host, A.port); if (!strcmp(forb, now_sv)) snprintf(A.ip, sizeof A.ip, "%s", ipb); }
-    A.field_last = GetPrivateProfileIntA("wincan", "editfield", 0, A.ini); A.ind[0] = GetPrivateProfileIntA("wincan", "bollinger", 1, A.ini); A.ind[1] = GetPrivateProfileIntA("wincan", "ma9", 1, A.ini); A.ind[2] = GetPrivateProfileIntA("wincan", "ma200", 1, A.ini); A.hover = -1;
+    A.field_last = GetPrivateProfileIntA("wincan", "editfield", 0, A.ini); A.ind[0] = GetPrivateProfileIntA("wincan", "bollinger", 1, A.ini); A.ind[1] = GetPrivateProfileIntA("wincan", "ma9", 1, A.ini); A.ind[2] = GetPrivateProfileIntA("wincan", "ma200", 1, A.ini); A.ind[3] = GetPrivateProfileIntA("wincan", "volcandles", 0, A.ini); A.hover = -1;
     A.scale = GetPrivateProfileIntA("wincan", "scale", 100, A.ini); if (A.scale < 75 || A.scale > 400) A.scale = 100;
     int server_given = 0, argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; i++) {
@@ -956,7 +972,8 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
         else if (!strcmp(a, "--test-close")) A.test_close = 1;
         else if (!strcmp(a, "--shot-editor")) A.shot_editor = 1;
         else if (!strcmp(a, "--shot-hover") && i + 1 < argc) { A.hover = atoi(nx); i++; }
-        else if (!strcmp(a, "--shot-off") && i + 1 < argc) { A.ind[atoi(nx) % 3] = 0; i++; }
+        else if (!strcmp(a, "--shot-off") && i + 1 < argc) { A.ind[atoi(nx) % 4] = 0; i++; }
+        else if (!strcmp(a, "--shot-on") && i + 1 < argc) { A.ind[atoi(nx) % 4] = 1; i++; }
         else if (!strcmp(a, "--version")) { MessageBoxA(NULL, "wincan " PACKAGE_VERSION, "wincan", MB_OK); return 0; }
     }
     if (server_given && !A.shot) save_all();                       /* the server given on the command line is kept */

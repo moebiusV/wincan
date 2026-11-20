@@ -59,6 +59,15 @@ static int is_marker(const Rec *r) { return r->N == 0xFFFFFFFFu && r->V == -1.0f
 
 static void unframe(const unsigned char *f, Rec *r) { memcpy(r, f + 1, sizeof *r); }
 
+/* the time a marker gives, in milliseconds: whole seconds in the first four bytes (O) and, in newer collectors, the milliseconds as the payload of the NaN in J (payload = ms + 1; none = 0) */
+static int64_t marker_ms(const Rec *r)
+{
+    uint32_t secs, jb; memcpy(&secs, &r->O, 4); memcpy(&jb, &r->J, 4);
+    uint32_t pl = jb & 0x3FFFFFu, ms = pl ? pl - 1 : 0;
+    if (ms > 999) ms = 0;
+    return (int64_t)secs * 1000 + ms;
+}
+
 /* a candle that can be believed: positive prices, the high and low around the open and close, and nothing that moved by half in 100 ms
  * (a collector killed in mid-write has left frames with garbage in them that still start with '{' and end with '}') */
 static int sane(const Rec *r)
@@ -108,7 +117,7 @@ static int64_t start_time(const unsigned char *b, const int64_t *offs, int64_t n
     int64_t t = t_end_ms;
     for (int64_t i = n - 1; i >= 0; i--) {
         Rec r; unframe(b + offs[i], &r);
-        if (is_marker(&r)) { uint32_t ts; memcpy(&ts, &r.O, 4); t = (int64_t)ts * 1000; }
+        if (is_marker(&r)) t = marker_ms(&r);
         else t -= REC_MS;
     }
     return t;
@@ -121,7 +130,7 @@ static int64_t fold(Series *s, const unsigned char *b, const int64_t *offs, int6
     int64_t t = t_first_ms;
     for (int64_t k = 0; k < n; k++) {
         Rec r; unframe(b + offs[k], &r);
-        if (is_marker(&r)) { uint32_t ts; memcpy(&ts, &r.O, 4); t = (int64_t)ts * 1000; continue; }
+        if (is_marker(&r)) { t = marker_ms(&r); continue; }
         int64_t tc = t; t += REC_MS;
         if (!sane(&r)) continue;                                                  /* garbage: not a candle */
         if (!(r.V >= 0 && r.V < 1e13f)) r.V = 0;                                  /* a garbage volume does not spoil the price */
@@ -516,8 +525,7 @@ static int64_t last_minute(const Series *s)
 
 /*
  * The minute from the first series that has it, the first minute of a file that began mid-minute only if nothing else has it.  A database is
- * authoritative for every minute it has except those at the live edge (the last two minutes of all the data), where the ticks of the collector
- * are used: the database may not have them yet, or not in their final form.
+ * authoritative for every minute it has except the one still forming, where the ticks of the collector are used: the database does not have it yet.
  */
 static const Bar *pick(Series **l, int n, int64_t m, int live)
 {
@@ -544,6 +552,7 @@ void series_queryN(Series **l, int cnt, int tf, int n, int64_t now_ms, Out *out)
     if (n > MAX_BARS) n = MAX_BARS;
     if (n < 1) n = 1;
     lock_all(l, cnt);
+    int64_t now_min = floor_div(now_ms, 60000);                          /* the minute forming: the only one the ticks are preferred for */
     int64_t lastmin = INT64_MIN, oldest = INT64_MAX; const Series *lead = NULL; int complete = 1;
     for (int i = 0; i < cnt; i++) {
         if (!l[i]) continue;
@@ -563,7 +572,7 @@ void series_queryN(Series **l, int cnt, int tf, int n, int64_t now_ms, Out *out)
             float o = 0, h = 0, lo2 = 0, c = 0, v = 0; int got = 0;
             if (key + step - 1 < oldest) break;                              /* past the oldest bar */
             for (int64_t m = key; m < key + step; m++) {
-                const Bar *bb = pick(l, cnt, m, m >= lastmin - 1);
+                const Bar *bb = pick(l, cnt, m, m >= now_min);
                 if (!bb) continue;
                 if (!got) { o = bb->o; h = bb->h; lo2 = bb->l; got = 1; } else { if (bb->h > h) h = bb->h; if (bb->l < lo2) lo2 = bb->l; }
                 c = bb->c; v += bb->v;
@@ -580,10 +589,11 @@ void series_queryN(Series **l, int cnt, int tf, int n, int64_t now_ms, Out *out)
     unlock_all(l, cnt);
 }
 
-void series_rangeN(Series **l, int cnt, int64_t since_sec, Range *r)
+void series_rangeN(Series **l, int cnt, int64_t since_sec, int64_t now_ms, Range *r)
 {
     memset(r, 0, sizeof *r);
     lock_all(l, cnt);
+    int64_t now_min = floor_div(now_ms, 60000);
     int64_t last = INT64_MIN, oldest = INT64_MAX; const Series *lead = NULL;
     for (int i = 0; i < cnt; i++) {
         if (!l[i]) continue;
@@ -597,7 +607,7 @@ void series_rangeN(Series **l, int cnt, int64_t since_sec, Range *r)
         int64_t first = floor_div(since_sec, 60);
         if (first < oldest) first = oldest;
         for (int64_t m = first; m <= last; m++) {
-            const Bar *bb = pick(l, cnt, m, m >= last - 1);
+            const Bar *bb = pick(l, cnt, m, m >= now_min);
             if (!bb) continue;
             if (r->n == 0 || bb->h > r->high) { r->high = bb->h; r->high_t = m * 60; }
             if (r->n == 0 || bb->l < r->low)  { r->low = bb->l;  r->low_t = m * 60; }
@@ -608,6 +618,6 @@ void series_rangeN(Series **l, int cnt, int64_t since_sec, Range *r)
 }
 
 void series_query2(Series *p, Series *b2, int tf, int n, int64_t now_ms, Out *out) { Series *l[2] = { p, b2 }; series_queryN(l, 2, tf, n, now_ms, out); }
-void series_range2(Series *p, Series *b2, int64_t since_sec, Range *r) { Series *l[2] = { p, b2 }; series_rangeN(l, 2, since_sec, r); }
+void series_range2(Series *p, Series *b2, int64_t since_sec, int64_t now_ms, Range *r) { Series *l[2] = { p, b2 }; series_rangeN(l, 2, since_sec, now_ms, r); }
 
 void series_query(Series *s, int tf, int n, int64_t now_ms, Out *out) { series_query2(s, NULL, tf, n, now_ms, out); }

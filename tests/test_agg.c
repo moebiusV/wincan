@@ -214,7 +214,7 @@ static void check_range(void)
     set_mtime(p, t0 + N * 100LL);
     Series s; series_open(&s, p, 20000); series_tail(&s, 50000); while (series_history(&s, 400000)) ;
     long long since = t0 / 1000 + 20 * 60;                       /* from minute 20 on */
-    Range r; series_range2(&s, NULL, since, &r);
+    Range r; series_range2(&s, NULL, since, t0 + N * 100LL, &r);
     double hi = -1, lo = 1e9; for (long i = 20 * 600; i < N; i++) { Rec x = mk(i); if (x.H > hi) hi = x.H; if (x.L < lo) lo = x.L; }
     CHECK("range: 40 minutes", r.n == 40);
     CHECK("range: high", fabs(r.high - hi) < 1e-3);
@@ -274,23 +274,24 @@ static void check_database(void)
     CHECK("db: tail", series_tail(&sd, 0) == 0);
     while (series_history(&sd, 0)) ;
     Series *l[3] = { &sf, &sd, NULL };
-    Out o; series_queryN(l, 3, 1, 200, t0 + 180LL * 60000, &o);
+    long long NOW = t0 + 179LL * 60000 + 30000;                       /* half way into minute 179: the one forming */
+    Out o; series_queryN(l, 3, 1, 200, NOW, &o);
     int ok1 = 0, ok2 = 0, ok3 = 0, ok4 = 0;
     for (int i = 0; i < o.n; i++) {
         long m = (long)(o.t[i] / 60) - M0;
         if (m == 100) ok1 = fabs(o.o[i] - 1100) < 1e-3 && fabs(o.c[i] - 1101) < 1e-3;             /* old, in both: the database */
         if (m == 160) ok2 = fabs(o.o[i] - 1160) < 1e-3;                                           /* in both, not at the edge: the database */
-        if (m == 178) ok3 = fabs(o.c[i] - 228) < 1e-3;                                            /* at the live edge: the file */
+        if (m == 178) ok3 = fabs(o.o[i] - 1178) < 1e-3;                                           /* closed: the database, though the ticks have it too */
         if (m == 179) ok4 = fabs(o.c[i] - 229) < 1e-3;
     }
     CHECK("db: an old minute from the database", ok1);
     CHECK("db: a recent minute that the database has, from the database", ok2);
-    CHECK("db: the last two minutes from the ticks", ok3 && ok4);
+    CHECK("db: a closed minute from the database, only the minute forming from the ticks", ok3 && ok4);
     /* the database lags: rows only up to minute 139: the minutes after come from the file, and where neither has any there is no bar */
     sqlite3_exec(db, "DELETE FROM candles WHERE ts >= (SELECT MIN(ts) FROM candles) + 140 * 60", 0, 0, 0);
     Series sd2; series_open_db(&sd2, pdb, "TSTUSDT", 20000); series_tail(&sd2, 0); while (series_history(&sd2, 0)) ;
     Series *l2[3] = { &sf, &sd2, NULL };
-    series_queryN(l2, 3, 1, 200, t0 + 180LL * 60000, &o);
+    series_queryN(l2, 3, 1, 200, NOW, &o);
     int has145 = 0, ok155 = 0, ok139 = 0;
     for (int i = 0; i < o.n; i++) {
         long m = (long)(o.t[i] / 60) - M0;
@@ -305,7 +306,7 @@ static void check_database(void)
     sqlite3_exec(db, sql, 0, 0, 0);
     sd2.last_check_ms = 0;
     CHECK("db: refresh", series_refresh(&sd2) == 0);
-    series_queryN(l2, 3, 1, 200, t0 + 180LL * 60000, &o);
+    series_queryN(l2, 3, 1, 200, NOW, &o);
     int ok140 = 0; for (int i = 0; i < o.n; i++) if ((long)(o.t[i] / 60) - M0 == 140) ok140 = fabs(o.o[i] - 1500) < 1e-3;
     CHECK("db: a new row is seen after a refresh", ok140);
     series_close(&sf); series_close(&sd); series_close(&sd2); sqlite3_close(db); unlink(pdb); unlink(pf);
@@ -345,20 +346,20 @@ static void check_bins(void)
     CHECK("bins: open", series_open_bin(&sb, pb, 20000) == 0);
     CHECK("bins: tail", series_tail(&sb, 0) == 0);
     Series *l[4] = { &sf, &sd, &sb, NULL };
-    Out o; series_queryN(l, 4, 1, 200, t0 + 180LL * 60000, &o);
+    Out o; series_queryN(l, 4, 1, 200, t0 + 179LL * 60000 + 30000, &o);
     int ok_db = 0, ok_old = 0, ok_bin = 0, ok_live = 0, ok_edge = 0;
     for (int i = 0; i < o.n; i++) {
         long m = (long)(o.t[i] / 60) - M0;
         if (m == 90)  ok_old = fabs(o.o[i] - 1090) < 1e-3;           /* only the database has it */
         if (m == 120) ok_db = fabs(o.o[i] - 1120) < 1e-3;            /* the database and the bins: the database */
         if (m == 155) ok_bin = fabs(o.o[i] - 3155) < 1e-3;           /* the bins and the ticks, not the database: the bins */
-        if (m == 178) ok_live = fabs(o.o[i] - 228) < 1e-3;           /* the last two minutes: the ticks first, though the bins have it too */
+        if (m == 178) ok_live = fabs(o.o[i] - 228) < 1e-3;           /* closed, but neither the database nor the bins have it: the ticks */
         if (m == 179) ok_edge = fabs(o.c[i] - 229) < 1e-3;
     }
     CHECK("bins: a minute only the database has", ok_old);
     CHECK("bins: the database over the bins", ok_db);
     CHECK("bins: the bins over the ticks where the database lacks the minute", ok_bin);
-    CHECK("bins: the ticks at the live edge", ok_live && ok_edge);
+    CHECK("bins: the ticks where nothing official has the minute, and for the minute forming", ok_live && ok_edge);
     /* the daemon appends a closed minute: a refresh reads it */
     f = fopen(pb, "ab");
     { unsigned char rec[80]; memset(rec, 0, sizeof rec); int64_t ts = (int64_t)(M0 + 178) * 60; double d[8] = { 4000, 4002, 3999, 4001, 5, 0, 0, 0 }; memcpy(rec, &ts, 8); memcpy(rec + 8, d, sizeof d); fwrite(rec, 1, 80, f); }
@@ -371,8 +372,33 @@ static void check_bins(void)
     series_close(&sf); series_close(&sd); series_close(&sb); sqlite3_close(db); unlink(pdb); unlink(pf); unlink(pb);
 }
 
+/* a marker with milliseconds in the payload of its NaN: the candles after it begin at that millisecond */
+static void marker_ms_frame(FILE *f, long long ms)
+{
+    Rec m; memset(&m, 0, sizeof m); uint32_t secs = (uint32_t)(ms / 1000), jb = 0x7FC00000u | (uint32_t)(ms % 1000 + 1); memcpy(&m.O, &secs, 4);
+    m.V = -1.0f; memcpy(&m.J, &jb, 4); m.N = 0xFFFFFFFFu; frame(f, &m);
+}
+static void check_marker_ms(void)
+{
+    const char *p = "/tmp/wincan-test8.bin"; unlink(p);
+    long long B = 1700000040000LL + 600000LL;                        /* a minute boundary */
+    FILE *f = fopen(p, "wb");
+    marker_ms_frame(f, B - 3000 - 700);                              /* the next candle begins at B - 3.7 s */
+    for (int i = 0; i < 37; i++) { Rec r; r.O = r.H = r.L = r.C = 100; r.V = 1; r.J = 0; r.N = 1; frame(f, &r); }    /* B - 3.7 s up to B */
+    for (int i = 0; i < 30; i++) { Rec r; r.O = r.H = r.L = r.C = 200; r.V = 1; r.J = 0; r.N = 1; frame(f, &r); }    /* from B */
+    fclose(f);
+    set_mtime(p, B + 3000);
+    Series s; series_open(&s, p, 20000); series_tail(&s, 5000); while (series_history(&s, 400000)) ;
+    Out o; series_queryN((Series *[]){ &s }, 1, 1, 5, B + 1000, &o);
+    CHECK("marker ms: two bars", o.n == 2);
+    CHECK("marker ms: the minute before closes at 100", o.n == 2 && fabs(o.c[0] - 100) < 1e-4);
+    CHECK("marker ms: the minute from B opens at 200, exactly", o.n == 2 && fabs(o.o[1] - 200) < 1e-4);
+    series_close(&s); unlink(p);
+}
+
 int main(void)
 {
+    check_marker_ms();
     check_bins();
     check_database();
     check_fill();

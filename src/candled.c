@@ -319,7 +319,7 @@ static int handle(int fd, char *body, size_t bodycap, Out *out)
         Coin *c = coin_get(pair);
         if (!c) { respond(fd, 404, "Not Found", "{\"error\":\"no such pair\"}", 24); return 1; }
         { int64_t t = now_ms(); if (t - c->last_req_ms >= 5000) refresh_coin(c); c->last_req_ms = t; }
-        Range r; { Series *l[NSRC]; coin_list(c, l); series_rangeN(l, NSRC, atoll(ss), &r); }
+        Range r; { Series *l[NSRC]; coin_list(c, l); series_rangeN(l, NSRC, atoll(ss), now_ms(), &r); }
         int o = snprintf(body, bodycap, "{\"pair\":\"%s\",\"since\":%lld,\"n\":%d,\"high\":%.8g,\"high_t\":%lld,\"low\":%.8g,\"low_t\":%lld,\"price\":%.8g}",
                          pair, (long long)atoll(ss), r.n, r.high, (long long)r.high_t, r.low, (long long)r.low_t, (double)r.price);
         respond(fd, 200, "OK", body, o);

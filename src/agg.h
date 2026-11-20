@@ -66,10 +66,10 @@ void series_query(Series *s, int tf_minutes, int n, int64_t now_ms, Out *out);
 /* the same from two series: a minute is taken from the primary where it has one, else from the backfill (either may be NULL) */
 /* the highest high and lowest low of the minutes from since_sec to now, and the minute (seconds) of each; n is the number of minutes with data */
 typedef struct { double high, low; int64_t high_t, low_t; int n; float price; } Range;
-void series_range2(Series *primary, Series *backfill, int64_t since_sec, Range *r);
+void series_range2(Series *primary, Series *backfill, int64_t since_sec, int64_t now_ms, Range *r);
 /* the same from any number of series, in order of priority */
 void series_queryN(Series **list, int count, int tf_minutes, int n, int64_t now_ms, Out *out);
-void series_rangeN(Series **list, int count, int64_t since_sec, Range *r);
+void series_rangeN(Series **list, int count, int64_t since_sec, int64_t now_ms, Range *r);
 /* a series of 1-minute candles read from a SQLite database (table candles_kucoin_futures: pair, ts, open, high, low, close, volume), read-only; 0 on success */
 int  series_open_db(Series *s, const char *dbpath, const char *dbpair, int cap);
 /* a file of 80-byte one-minute candles (closed minutes only, appended by a websocket daemon); only the newest days are read; 0 on success */
