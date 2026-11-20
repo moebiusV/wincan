@@ -55,9 +55,9 @@ static struct {
     /* data (under cs) */
     CRITICAL_SECTION cs;
     int    n; double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS], v[MAX_BARS];
-    double price; double age_ms; int complete, have, failed;
+    double price, mark; double age_ms; int complete, have, failed;      /* mark: the exchange's mark price, 0 if none */
     char   data_pair[24]; int data_tf;
-    struct { char pair[24]; int tf, n, complete, need_full; double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS], v[MAX_BARS], price, age_ms; DWORD when, full_when; char sig[24]; } *cache; int ncache;      /* every timeframe looked at is kept, so going back to one is instant */
+    struct { char pair[24]; int tf, n, complete, need_full; double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS], v[MAX_BARS], price, mark, age_ms; DWORD when, full_when; char sig[24]; } *cache; int ncache;      /* every timeframe looked at is kept, so going back to one is instant */
     char   ip[64];                       /* the server's address, found once: resolving a .local name takes a third of a second */
     HANDLE wake; volatile int quit;
     /* ui */
@@ -306,6 +306,7 @@ static void do_close(void)
     int i = pair_index(pair), sl = find_slot(pair, A.tf);
     if (i < 0) { LeaveCriticalSection(&A.cs); return; }
     p = A.pos[i]; price = sl >= 0 ? A.cache[sl].price : A.price;
+    if (sl >= 0 && A.cache[sl].mark > 0) price = A.cache[sl].mark;                 /* closed at the mark, as an exchange values a position */
     LeaveCriticalSection(&A.cs);
     if (!(p.entry > 0 && p.size != 0 && price > 0)) return;
     if (p.opened <= 0) p.opened = (long long)time(NULL);
@@ -364,11 +365,11 @@ static DWORD WINAPI worker(LPVOID arg)
         EnterCriticalSection(&A.cs);
         if (b) {
             { static char saved_ip[64]; if (A.ip[0] && strcmp(saved_ip, A.ip)) { snprintf(saved_ip, sizeof saved_ip, "%s", A.ip); PostMessage(A.hwnd, WM_APP + 4, 0, 0); } }
-            double price = get_num(b, "price"), age = get_num(b, "age_ms"); int complete = strstr(b, "\"complete\":true") != NULL;
+            double price = get_num(b, "price"), mark = get_num(b, "mark"), age = get_num(b, "age_ms"); int complete = strstr(b, "\"complete\":true") != NULL;
             char nsig[24] = ""; get_str(b, "sig", nsig, sizeof nsig);
             int slot = find_slot(pair, tf);
             if (strstr(b, "\"unchanged\":true") && slot >= 0) {                      /* nothing moved: only the age and the price may have */
-                A.cache[slot].price = price > 0 ? price : A.cache[slot].price; A.cache[slot].age_ms = age; A.cache[slot].complete = complete;
+                A.cache[slot].price = price > 0 ? price : A.cache[slot].price; A.cache[slot].mark = mark; A.cache[slot].age_ms = age; A.cache[slot].complete = complete;
                 A.failed = 0;
             } else {
                 int n = get_arr(b, "t", t, MAX_BARS);
@@ -400,7 +401,7 @@ static DWORD WINAPI worker(LPVOID arg)
                         A.cache[slot].n = n; A.cache[slot].need_full = 0; A.cache[slot].full_when = GetTickCount();
                     }
                     snprintf(A.cache[slot].sig, sizeof A.cache[slot].sig, "%s", nsig);
-                    A.cache[slot].complete = complete; A.cache[slot].price = price; A.cache[slot].age_ms = age; A.cache[slot].when = GetTickCount();
+                    A.cache[slot].complete = complete; A.cache[slot].price = price; A.cache[slot].mark = mark; A.cache[slot].age_ms = age; A.cache[slot].when = GetTickCount();
                     A.failed = 0;
                 } else A.failed = 1;
             }
@@ -491,6 +492,7 @@ static void paint(HDC dc, int W, int H)
     int tf = A.tf, n = A.have && !strcmp(A.data_pair, pair) && A.data_tf == A.tf ? A.n : 0;
     int failed = A.failed, have = A.have, complete = A.complete;
     double price = A.price, age = A.age_ms;
+    double pnl_price = A.mark > 0 ? A.mark : A.price;                   /* the P&L is at the mark price, which moves every second, like KuCoin's; the header shows the last trade */
     static double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS], v[MAX_BARS];
     memcpy(o, A.o, sizeof o); memcpy(h, A.h, sizeof h); memcpy(l, A.l, sizeof l); memcpy(c, A.c, sizeof c); memcpy(v, A.v, sizeof v); (void)t;
     LeaveCriticalSection(&A.cs);
@@ -614,7 +616,7 @@ static void paint(HDC dc, int W, int H)
         }
         text(dc, fs, COL_DIM, U(8), y0 + U(4) + 4 * U(19) + U(2), "Tab: next   Enter or mouse out: done   Esc: cancel", 0);
     } else if (pos.entry > 0 && pos.size != 0 && n > 0) {
-        Fig fg = figures(&pos, price);                           /* as KuCoin's panel: the unrealized profit and its return on the initial margin (value / leverage); the realized is shown apart */
+        Fig fg = figures(&pos, pnl_price);                       /* as KuCoin's panel: the unrealized profit and its return on the initial margin (value / leverage); the realized is shown apart */
         double usd = fg.unreal, pct = fg.pct_unreal;
         COLORREF col = usd > 0 ? COL_UP : usd < 0 ? COL_DOWN : COL_TXT;
         snprintf(buf, sizeof buf, "%+.2f%%", pct); fmt_money(usd, buf2, sizeof buf2);
@@ -626,7 +628,7 @@ static void paint(HDC dc, int W, int H)
             char lv[16] = "", rl[48] = "";
             if (pos.leverage > 0) snprintf(lv, sizeof lv, "  %.4gx", pos.leverage);
             if (pos.realized != 0) snprintf(rl, sizeof rl, "  real %+.2f  net %+.2f", pos.realized, fg.total);
-            if (pos.have_range) { double mfe, mae, a1, a2; excursions(&pos, pos.hi > price ? pos.hi : price, pos.lo < price ? pos.lo : price, &mfe, &mae, &a1, &a2);
+            if (pos.have_range) { double mfe, mae, a1, a2; excursions(&pos, pos.hi > pnl_price ? pos.hi : pnl_price, pos.lo < pnl_price ? pos.lo : pnl_price, &mfe, &mae, &a1, &a2);
                 snprintf(buf2, sizeof buf2, "%.6g @ %s%s%s  best %+.1f%% worst %+.1f%%", pos.size, buf, lv, rl, mfe, mae); }
             else snprintf(buf2, sizeof buf2, "%.6g @ %s%s%s", pos.size, buf, lv, rl);
             if (strlen(buf2) > 46) snprintf(buf2, sizeof buf2, "%.6g @ %s%s%s", pos.size, buf, lv, rl);       /* the dots take the right end of the line: the best and worst go if it would run into them */
@@ -768,7 +770,7 @@ static void show_cached(void)
     A.have = 0; A.n = 0;
     for (int i = 0; i < A.ncache; i++) if (A.cache[i].tf == A.tf && !strcmp(A.cache[i].pair, A.pair)) {
         memcpy(A.o, A.cache[i].o, sizeof A.o); memcpy(A.h, A.cache[i].h, sizeof A.h); memcpy(A.l, A.cache[i].l, sizeof A.l); memcpy(A.c, A.cache[i].c, sizeof A.c); memcpy(A.v, A.cache[i].v, sizeof A.v);
-        A.n = A.cache[i].n; A.price = A.cache[i].price; A.age_ms = A.cache[i].age_ms; A.complete = A.cache[i].complete; A.have = 1;
+        A.n = A.cache[i].n; A.price = A.cache[i].price; A.mark = A.cache[i].mark; A.age_ms = A.cache[i].age_ms; A.complete = A.cache[i].complete; A.have = 1;
         snprintf(A.data_pair, sizeof A.data_pair, "%s", A.pair); A.data_tf = A.tf;
         break;
     }

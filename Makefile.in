@@ -22,7 +22,7 @@ endif
 all: $(TARGETS)
 
 candled: src/candled.c src/agg.c src/agg.h
-	$(CC) $(CFLAGS) $(WARN) -o $@ src/candled.c src/agg.c -lsqlite3 -lpthread
+	$(CC) $(CFLAGS) $(WARN) -o $@ src/candled.c src/agg.c -lsqlite3 -lcurl -lpthread
 
 wincan.exe: src/wincan.c
 	$(WINCC) $(CFLAGS) $(WARN) -mwindows -o $@ src/wincan.c -lgdi32 -lwinhttp -lshell32 -luser32 -lws2_32

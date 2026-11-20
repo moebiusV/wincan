@@ -19,3 +19,4 @@ wincan 0.1.0 (2026-11-20)
   A fourth toggle dot switches between standard candles and volume candles (width in proportion to volume).  The ticks are used only for the candle still forming; the collector's markers carry milliseconds, so the open of the forming candle is closer to the exchange's.
   Volume candles follow the width rule measured from KuCoin's own chart (never thinner than standard; max(1, -0.92 + 1.907 sqrt(volume/median)) times the standard width; overlapping), not a guessed cap.
   Volume candles: the width rule refitted on a second KuCoin screenshot (88 candles): logarithmic against the mean volume.
+  candled --official-klines: KuCoin's own final candle replaces a closed minute within seconds, and the mark price (every second) is served as "mark"; wincan's P&L and a trade closed with x use the mark, as KuCoin does, so the P&L moves every second.

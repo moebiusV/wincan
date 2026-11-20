@@ -24,12 +24,14 @@
 #include <stdint.h>
 #include <arpa/inet.h>
 #include <sqlite3.h>
+#include <curl/curl.h>
 
 #define MAX_PAIRS 512
 static const char *dir = ".", *dir2 = NULL, *dbpath = NULL, *binsdir = NULL;      /* the files of the live collector, the backfill files (spot), and the database whose candles table is authoritative */
 /* the sources of a coin, in order: the live files (100 ms ticks), the database, the websocket daemon's bins (closed minutes), the backfill files */
-#define NSRC 4
-typedef struct { char name[24]; Series s[NSRC]; int has[NSRC]; time_t checked; volatile int64_t last_req_ms, last_refresh_ms; } Coin;
+#define NSRC 5
+typedef struct { char name[24]; Series s[NSRC]; int has[NSRC]; time_t checked; volatile int64_t last_req_ms, last_refresh_ms; int64_t rest_min; int rest_final; volatile double mark; volatile int64_t mark_ms; } Coin;
+static int rest_enabled;
 static char dbnames[MAX_PAIRS][24]; static int ndbnames; static pthread_mutex_t dbnames_mu = PTHREAD_MUTEX_INITIALIZER;
 static Coin coins[MAX_PAIRS];
 static int ncoins;
@@ -159,6 +161,7 @@ static Coin *coin_get(const char *name)
         c->has[1] = dbpath ? open_db_series(&c->s[1], name) : 0;
         c->has[2] = binsdir ? open_bin_series(&c->s[2], name) : 0;
         c->has[3] = dir2 ? open_series(&c->s[3], dir2, name) : 0;
+        c->has[4] = rest_enabled && series_open_rest(&c->s[4], 2880) == 0;       /* the official candles of the last two days, put in as minutes close */
         if (!c->has[0] && !c->has[1] && !c->has[2] && !c->has[3]) { pthread_mutex_unlock(&reg); return NULL; }
         refresh_coin(c);                                          /* opening the sources took a while: bring them up to date before the first answer */
         c->checked = time(NULL); c->last_req_ms = c->last_refresh_ms = now_ms();
@@ -174,6 +177,95 @@ static Coin *coin_get(const char *name)
 }
 
 typedef struct { char n[64]; time_t t; } PairEnt;
+
+/* ---- the exchange's official candles ---- */
+
+struct Buf { char *p; size_t n, cap; };
+static size_t buf_write(char *d, size_t sz, size_t nm, void *ud)
+{
+    struct Buf *b = ud; size_t add = sz * nm;
+    if (b->n + add + 1 > b->cap) { b->cap = (b->n + add + 1) * 2; b->p = realloc(b->p, b->cap); if (!b->p) return 0; }
+    memcpy(b->p + b->n, d, add); b->n += add; b->p[b->n] = 0;
+    return add;
+}
+
+/* KuCoin Futures klines of a coin for the minutes from..to (seconds), put into its official series; returns the number of minutes taken */
+static int fetch_official(Coin *c, CURL *curl, int64_t from_s, int64_t to_s, int64_t now_min)
+{
+    char sym[48], url[300];
+    snprintf(sym, sizeof sym, "%sUSDTM", strcmp(c->name, "BTC") == 0 ? "XBT" : c->name);
+    snprintf(url, sizeof url, "https://api-futures.kucoin.com/api/v1/kline/query?symbol=%s&granularity=1&from=%lld&to=%lld", sym, (long long)from_s * 1000, (long long)to_s * 1000);
+    struct Buf b = { NULL, 0, 0 };
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, buf_write);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &b);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 4L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    int taken = 0;
+    if (curl_easy_perform(curl) == CURLE_OK && b.p) {
+        const char *p = strstr(b.p, "\"data\":[");
+        if (p) {
+            p += 8;
+            while ((p = strchr(p, '[')) != NULL) {            /* a row: [time ms, open, high, low, close, volume, turnover] */
+                p++;
+                double v[7]; int k = 0;
+                while (k < 7) { char *e; v[k] = strtod(p, &e); if (e == p) break; k++; p = e; while (*p == ',' || *p == ' ') p++; }
+                int64_t mm = (int64_t)(v[0] / 60000.0);
+                if (k >= 6 && mm < now_min) { series_put(&c->s[4], mm, v[1], v[2], v[3], v[4], v[5]); taken++; }        /* closed minutes only: the one forming is not final */
+            }
+        }
+    }
+    free(b.p);
+    return taken;
+}
+
+/* the mark price (what an exchange values a position at: recomputed every second, whether or not anyone trades) of a coin, for its P&L */
+static void fetch_mark(Coin *c, CURL *curl)
+{
+    char url[240];
+    snprintf(url, sizeof url, "https://api-futures.kucoin.com/api/v1/mark-price/%sUSDTM/current", strcmp(c->name, "BTC") == 0 ? "XBT" : c->name);
+    struct Buf b = { NULL, 0, 0 };
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, buf_write);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &b);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    if (curl_easy_perform(curl) == CURLE_OK && b.p) {
+        const char *p = strstr(b.p, "\"value\":");
+        if (p) { double v = strtod(p + 8, NULL); if (v > 0) { c->mark = v; c->mark_ms = now_ms(); } }
+    }
+    free(b.p);
+}
+
+/*
+ * The exchange's official candle of a minute replaces what was made of ticks and files as soon as it can be had.  For the pairs being watched: one second after a
+ * minute has closed, and again three seconds later (a candle can still change a little at the close); a pair that was not watched is fetched once, at once, when it is.
+ */
+static void *official_thread(void *arg)
+{
+    (void)arg;
+    CURL *curl = curl_easy_init();
+    if (!curl) return NULL;
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "candled");
+    for (;;) {
+        struct timespec ts = { 0, 250 * 1000000L }; nanosleep(&ts, NULL);
+        int64_t t = now_ms(), cur = t / 60000, closed = cur - 1;        /* the minute that has just closed */
+        double into = (double)(t - cur * 60000) / 1000.0;               /* seconds since it closed */
+        for (int i = 0; i < ncoins; i++) {
+            Coin *c = &coins[i];
+            if (!c->has[4] || t - c->last_req_ms >= 5000) continue;     /* only a pair someone is looking at */
+            if (t - c->mark_ms >= 1000) fetch_mark(c, curl);            /* its mark price, every second */
+            if (c->rest_min != closed && into >= 1.0) {
+                fetch_official(c, curl, (closed - 2) * 60, (closed + 1) * 60, cur);
+                c->rest_min = closed; c->rest_final = into >= 4.0;
+            } else if (c->rest_min == closed && !c->rest_final && into >= 4.0) {
+                fetch_official(c, curl, (closed - 1) * 60, (closed + 1) * 60, cur);
+                c->rest_final = 1;
+            }
+        }
+    }
+    return NULL;
+}
 
 static int by_mtime_desc(const void *a, const void *b)
 {
@@ -296,13 +388,13 @@ static int handle(int fd, char *body, size_t bodycap, Out *out)
         { Series *l[NSRC]; coin_list(c, l); series_queryN(l, NSRC, tf, n, now_ms(), out); }
         char sig[24]; signature(out, sig);
         if (seen[0] && !strcmp(seen, sig)) {                       /* nothing changed since the client's last answer: a few bytes only */
-            int u = snprintf(body, bodycap, "{\"pair\":\"%s\",\"tf\":\"%s\",\"unchanged\":true,\"sig\":\"%s\",\"price\":%.8g,\"age_ms\":%lld,\"complete\":%s}",
-                             pair, tfs, sig, (double)out->price, (long long)out->age_ms, out->complete ? "true" : "false");
+            int u = snprintf(body, bodycap, "{\"pair\":\"%s\",\"tf\":\"%s\",\"unchanged\":true,\"sig\":\"%s\",\"price\":%.8g,\"mark\":%.8g,\"age_ms\":%lld,\"complete\":%s}",
+                             pair, tfs, sig, (double)out->price, (double)c->mark, (long long)out->age_ms, out->complete ? "true" : "false");
             respond(fd, 200, "OK", body, u);
             return 1;
         }
-        int o = snprintf(body, bodycap, "{\"pair\":\"%s\",\"tf\":\"%s\",\"sig\":\"%s\",\"price\":%.8g,\"age_ms\":%lld,\"complete\":%s,\"n\":%d,",
-                         pair, tfs, sig, (double)out->price, (long long)out->age_ms, out->complete ? "true" : "false", out->n);
+        int o = snprintf(body, bodycap, "{\"pair\":\"%s\",\"tf\":\"%s\",\"sig\":\"%s\",\"price\":%.8g,\"mark\":%.8g,\"age_ms\":%lld,\"complete\":%s,\"n\":%d,",
+                         pair, tfs, sig, (double)out->price, (double)c->mark, (long long)out->age_ms, out->complete ? "true" : "false", out->n);
         arr(body, bodycap, &o, "t", NULL, out->t, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");
         arr(body, bodycap, &o, "o", out->o, NULL, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");
         arr(body, bodycap, &o, "h", out->h, NULL, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");
@@ -354,10 +446,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--backfill") && i + 1 < argc) dir2 = argv[++i];
         else if (!strcmp(argv[i], "--db") && i + 1 < argc) dbpath = argv[++i];
         else if (!strcmp(argv[i], "--live-bins") && i + 1 < argc) binsdir = argv[++i];
+        else if (!strcmp(argv[i], "--official-klines")) rest_enabled = 1;
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bind") && i + 1 < argc) bind_addr = argv[++i];
         else if (!strcmp(argv[i], "--version")) { puts("candled " PACKAGE_VERSION); return 0; }
-        else { fprintf(stderr, "usage: candled --dir DIR [--db FILE] [--live-bins DIR] [--backfill DIR] [--port N] [--bind ADDR]\n"); return 2; }
+        else { fprintf(stderr, "usage: candled --dir DIR [--db FILE] [--live-bins DIR] [--official-klines] [--backfill DIR] [--port N] [--bind ADDR]\n"); return 2; }
     }
     signal(SIGPIPE, SIG_IGN);
     int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
@@ -365,6 +458,7 @@ int main(int argc, char **argv)
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
     if (inet_pton(AF_INET, bind_addr, &a.sin_addr) != 1) { fprintf(stderr, "candled: bad address %s\n", bind_addr); return 2; }
     if (bind(ls, (struct sockaddr *)&a, sizeof a) < 0 || listen(ls, 16) < 0) { perror("candled: bind"); return 1; }
+    if (rest_enabled) { curl_global_init(CURL_GLOBAL_DEFAULT); pthread_t ot; pthread_attr_t oa; pthread_attr_init(&oa); pthread_attr_setdetachstate(&oa, PTHREAD_CREATE_DETACHED); pthread_create(&ot, &oa, official_thread, NULL); pthread_attr_destroy(&oa); }
     { pthread_t rt; pthread_attr_t ra; pthread_attr_init(&ra); pthread_attr_setdetachstate(&ra, PTHREAD_CREATE_DETACHED); pthread_create(&rt, &ra, refresher, NULL); pthread_attr_destroy(&ra); }
     if (dbpath) { pthread_t dt; pthread_attr_t da; pthread_attr_init(&da); pthread_attr_setdetachstate(&da, PTHREAD_CREATE_DETACHED); pthread_create(&dt, &da, dbnames_thread, NULL); pthread_attr_destroy(&da); }
     fprintf(stderr, "candled: serving %s%s%s%s%s on %s:%d\n", dir, dbpath ? ", the candles of " : "", dbpath ? dbpath : "", dir2 ? ", backfilled from " : "", dir2 ? dir2 : "", bind_addr, port);

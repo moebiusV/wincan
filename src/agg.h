@@ -39,6 +39,7 @@ typedef struct {
     pthread_mutex_t rmu;              /* one refresh at a time */
     /* a series can instead be read from a SQLite table of 1-minute candles (candles_kucoin_futures of a database) */
     int             is_db;
+    int             is_rest;          /* bars put in by hand: the exchange's official candles, fetched when a minute has closed */
     int             is_bin;           /* a file of 80-byte one-minute candles (the websocket daemon's data/candles/<PAIR>.bin): int64 ts, 8 doubles (open high low close volume ...), int trades, padding */
     char            dbpath[512], dbpair[32];
     void           *db;               /* sqlite3 * */
@@ -74,6 +75,9 @@ void series_rangeN(Series **list, int count, int64_t since_sec, int64_t now_ms, 
 int  series_open_db(Series *s, const char *dbpath, const char *dbpair, int cap);
 /* a file of 80-byte one-minute candles (closed minutes only, appended by a websocket daemon); only the newest days are read; 0 on success */
 int  series_open_bin(Series *s, const char *path, int cap);
+/* a series that is filled with series_put: the exchange's own final candles, as soon as it has them; cap in minutes */
+int  series_open_rest(Series *s, int cap_minutes);
+void series_put(Series *s, int64_t minute, double o, double h, double l, double c, double v);
 void series_query2(Series *primary, Series *backfill, int tf_minutes, int n, int64_t now_ms, Out *out);
 int  tf_minutes(const char *name);                               /* "5m" -> 5; 0 when not one of the nine */
 

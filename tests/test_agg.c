@@ -431,8 +431,53 @@ static void check_forming(void)
     series_close(&s); unlink(p);
 }
 
+/* the official final candle, fetched at the close, replaces everything for a closed minute; the minute forming still comes from the ticks */
+static void check_official(void)
+{
+    const char *pf = "/tmp/wincan-test11.bin", *pb = "/tmp/wincan-test11b.bin";
+    unlink(pf); unlink(pb);
+    long long t0 = ((long long)time(NULL) / 60 - 400) * 60000LL; long M0 = (long)(t0 / 60000);
+    FILE *f = fopen(pf, "wb");                                        /* ticks: minutes 150..179 at 200 + (minute - 150) */
+    for (int i = 0; i < 18000; i++) {
+        if (i % 600 == 0) marker(f, t0 + (150LL * 60000) + (long long)i * 100LL);
+        Rec r; r.O = r.H = r.L = r.C = (float)(200 + i / 600); r.V = 1; r.J = 0; r.N = 1; frame(f, &r);
+    }
+    fclose(f); set_mtime(pf, t0 + 180LL * 60000);
+    f = fopen(pb, "wb");                                              /* the daemon's bins: minutes 150..178 at 3000 + i */
+    for (int i = 150; i < 179; i++) {
+        unsigned char rec[80]; memset(rec, 0, sizeof rec);
+        int64_t ts = (int64_t)(M0 + i) * 60; double d[8] = { 3000.0 + i, 3002.0 + i, 2999.0 + i, 3001.0 + i, 5, 0, 0, 0 };
+        memcpy(rec, &ts, 8); memcpy(rec + 8, d, sizeof d); fwrite(rec, 1, 80, f);
+    }
+    fclose(f);
+    Series sf, sb, sr; series_open(&sf, pf, 20000); series_tail(&sf, 20000); while (series_history(&sf, 400000)) ;
+    series_open_bin(&sb, pb, 20000); series_tail(&sb, 0);
+    CHECK("official: open", series_open_rest(&sr, 2880) == 0);
+    series_put(&sr, M0 + 178, 5000, 5002, 4999, 5001, 77);           /* the official candle of the minute just closed */
+    series_put(&sr, M0 + 179, 6000, 6002, 5999, 6001, 99);           /* and (wrongly) one for the forming minute: the ticks must still win there */
+    series_put(&sr, M0 + 100, 5.0, 5.0, 5.0, 5.0, 1);                 /* a minute only it has */
+    Series *l[5] = { &sf, NULL, &sb, NULL, &sr };
+    Out o; series_queryN(l, 5, 1, 200, t0 + 179LL * 60000 + 30000, &o);
+    int ok178 = 0, ok177 = 0, ok179 = 0, ok100 = 0;
+    for (int i = 0; i < o.n; i++) {
+        long m = (long)(o.t[i] / 60) - M0;
+        if (m == 178) ok178 = fabs(o.o[i] - 5000) < 1e-3 && fabs(o.v[i] - 77) < 1e-3;       /* the official candle, over the bins and the ticks */
+        if (m == 177) ok177 = fabs(o.o[i] - 3177) < 1e-3;                                  /* no official one: the bins */
+        if (m == 179) ok179 = fabs(o.c[i] - 229) < 1e-3;                                   /* forming: the ticks */
+        if (m == 100) ok100 = fabs(o.o[i] - 5.0) < 1e-3;
+    }
+    CHECK("official: the final candle replaces the bins and the ticks for a closed minute", ok178);
+    CHECK("official: a closed minute without one keeps the bins", ok177);
+    CHECK("official: the forming minute stays with the ticks", ok179);
+    CHECK("official: a minute that only it has", ok100);
+    CHECK("official: the price comes from the live source, not from the official candles", fabs(o.price - 229) < 1e-3);
+    CHECK("official: the age is that of the live source (not an official candle's future end)", o.age_ms > -31000);          /* the test clock is half a minute before the end of its own data */
+    series_close(&sf); series_close(&sb); series_close(&sr); unlink(pf); unlink(pb);
+}
+
 int main(void)
 {
+    check_official();
     check_forming();
     check_marker_ms();
     check_bins();

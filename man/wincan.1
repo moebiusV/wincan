@@ -50,7 +50,7 @@ A tray icon shows or hides the window with a click; its menu has Exit.  Ctrl+Alt
 window is in Alt\-Tab and has a taskbar button, which minimizes it.  A window hidden in the tray is not in Alt\-Tab: use the icon
 or Ctrl+Alt+C.
 .SH FIGURES
-As on KuCoin's position panel: the large figures are the unrealized profit or loss, in dollars and as a return on the initial margin (the entry value, entry times amount, divided by the leverage; the whole value if no leverage is given); the realized amount and the net (unrealized plus realized) are shown apart under them.  The price used is the last trade, where an exchange may use its mark price, so the dollars can differ by a few cents of a percent.
+As on KuCoin's position panel: the large figures are the unrealized profit or loss, in dollars and as a return on the initial margin (the entry value, entry times amount, divided by the leverage; the whole value if no leverage is given); the realized amount and the net (unrealized plus realized) are shown apart under them.  The price used is the mark price, as on KuCoin (which values a position at its mark price, recomputed every second, not at the last trade, so the figures move every second even when nobody trades); the server (candled with --official-klines) fetches it for the pair being watched, and without it the last trade is used.  A trade closed with x is closed at the mark.
 .SH TRADE LOG
 When a trade is closed with
 .BR x ,

@@ -421,6 +421,28 @@ static int bin_refresh(Series *s)
     return 0;
 }
 
+/* ---- bars put in by hand: the official candles ---- */
+
+int series_open_rest(Series *s, int cap_minutes)
+{
+    if (series_open(s, "rest", cap_minutes) != 0) return -1;
+    s->is_rest = 1; s->history_done = 1;
+    return 0;
+}
+
+void series_put(Series *s, int64_t minute, double o, double h, double l, double c, double v)
+{
+    double mx = o > c ? o : c, mn = o < c ? o : c;
+    if (!(o > 0 && h > 0 && l > 0 && c > 0) || h < mx * 0.9999 || l > mn * 1.0001 || h > mx * 3 || l < mn / 3) return;        /* not a believable minute */
+    pthread_mutex_lock(&s->mu);
+    if (s->base_min == 0) s->base_min = minute - (s->cap - 64);
+    Bar *b = slot_for(s, minute);
+    if (b) {
+        b->o = (float)o; b->h = (float)h; b->l = (float)l; b->c = (float)c; b->v = (v >= 0 && v < 1e13) ? (float)v : 0; b->has = 1; b->real = 1;
+    }
+    pthread_mutex_unlock(&s->mu);
+}
+
 int series_valid(const char *path)
 {
     struct stat st;
@@ -502,6 +524,7 @@ static int refresh_locked(Series *s)
 {
     if (s->is_db) return db_refresh(s);
     if (s->is_bin) return bin_refresh(s);
+    if (s->is_rest) return 0;                                            /* filled by series_put */
     int64_t size, mt;
     if (stat_file(s, &size, &mt) < 0) return -1;
     if (size == s->pos) return 0;
@@ -540,7 +563,8 @@ static int64_t last_minute(const Series *s)
  */
 static const Bar *pick(Series **l, int n, int64_t m, int live)
 {
-    if (!live) {                                                      /* the database first, then the exchange's own closed candles (the daemon's bins), then the rest in order */
+    if (!live) {                                                      /* the official final candle fetched at the close first, then the database, then the daemon's bins, then the rest in order */
+        for (int i = 0; i < n; i++) if (l[i] && l[i]->is_rest) { const Bar *b = bar_at(l[i], m); if (b) return b; }
         for (int i = 0; i < n; i++) if (l[i] && l[i]->is_db) { const Bar *b = bar_at(l[i], m); if (b) return b; }
         for (int i = 0; i < n; i++) if (l[i] && l[i]->is_bin) { const Bar *b = bar_at(l[i], m); if (b) return b; }
     }
@@ -569,7 +593,7 @@ void series_queryN(Series **l, int cnt, int tf, int n, int64_t now_ms, Out *out)
         if (!l[i]) continue;
         int64_t lm = last_minute(l[i]);
         if (lm > lastmin) lastmin = lm;
-        if (lm != INT64_MIN && (!lead || lm > last_minute(lead) || (lm == last_minute(lead) && l[i]->next_ms > lead->next_ms))) lead = l[i];      /* the price and the age come from the freshest source */
+        if (!l[i]->is_rest && lm != INT64_MIN && (!lead || lm > last_minute(lead) || (lm == last_minute(lead) && l[i]->next_ms > lead->next_ms))) lead = l[i];      /* the price and the age come from the freshest live source, never from the official candles (closed minutes only) */
         if (l[i]->base_min < oldest) oldest = l[i]->base_min;
         if (!l[i]->history_done) complete = 0;
     }
@@ -610,7 +634,7 @@ void series_rangeN(Series **l, int cnt, int64_t since_sec, int64_t now_ms, Range
         if (!l[i]) continue;
         int64_t lm = last_minute(l[i]);
         if (lm > last) last = lm;
-        if (lm != INT64_MIN && (!lead || lm > last_minute(lead) || (lm == last_minute(lead) && l[i]->next_ms > lead->next_ms))) lead = l[i];
+        if (!l[i]->is_rest && lm != INT64_MIN && (!lead || lm > last_minute(lead) || (lm == last_minute(lead) && l[i]->next_ms > lead->next_ms))) lead = l[i];
         if (l[i]->base_min < oldest) oldest = l[i]->base_min;
     }
     if (lead) r->price = lead->price;

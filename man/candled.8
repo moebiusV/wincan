@@ -98,6 +98,12 @@ usually 2: if nothing has changed (as in a second without a trade) the answer is
 otherwise the last
 .I n
 bars, to be merged by their start times into what the client already has.
+.SH OFFICIAL CANDLES AND THE MARK PRICE
+With
+.B \-\-official\-klines
+and for the pair being watched, a thread fetches KuCoin Futures' own final candle of each minute one second after it has closed, and again three seconds later, and that candle replaces whatever was built from the other sources (never for the minute still forming); and it fetches the mark price every second, which the answers carry as
+.BR mark .
+The price and age of an answer never come from the official candles.
 .SH LIMITS
 Without markers (the start of an old file, a stalled collector) the file's modification time stands for the end of the data.
 Bars older than the last interruption of the collector have their order and shape right but their clock times drift by the length of the gap.
