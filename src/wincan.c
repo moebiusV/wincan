@@ -163,6 +163,7 @@ static void resolve(void)
 }
 
 static HINTERNET g_sess, g_conn;                  /* kept open: one connection, reused for every request */
+static volatile LONG g_reset;                     /* set when the machine wakes from sleep: the old connection is dead, whatever it looks like */
 
 static void http_close(void)
 {
@@ -175,6 +176,7 @@ static char *http_get(const char *path)
 {
     wchar_t wpath[256];
     MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 256);
+    if (InterlockedExchange(&g_reset, 0)) { http_close(); A.ip[0] = 0; resolve(); }      /* after a suspend: a new connection, the name looked up anew (the network may have changed) */
     if (!g_conn) {                                  /* only at the start, or after a failure */
         wchar_t whost[160];
         MultiByteToWideChar(CP_UTF8, 0, A.ip[0] ? A.ip : A.host, -1, whost, 160);
@@ -1001,6 +1003,9 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         return 0;
     case WM_HOTKEY: show_hide(A.hidden); return 0;
+    case WM_POWERBROADCAST:                                    /* the laptop suspends and resumes: the connection to the server is gone; make a new one at the next poll */
+        if (w == PBT_APMRESUMEAUTOMATIC || w == PBT_APMRESUMESUSPEND || w == PBT_APMSUSPEND) InterlockedExchange(&g_reset, 1);
+        return TRUE;
     case WM_APP + 4: save_all(); return 0;                     /* the server's address worked: keep it */
     case WM_SHOWIT: show_hide(1); return 0;                    /* a second copy was started and found this one: show it */
     case WM_TRAY:

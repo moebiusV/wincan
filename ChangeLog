@@ -21,3 +21,5 @@
 2026-11-20  Snap distance 10 pixels (15 physical at 150% scaling).
 2026-11-20  Snap distance 12 (18 physical pixels at 150%).
 2026-11-20  Snap distance 11 (about 17 physical pixels at 150%).
+
+2026-11-20  wincan.c: the connection is renewed after the machine wakes from sleep (WM_POWERBROADCAST sets a flag; the next poll closes the old connection, looks the server name up anew and reconnects); a failed request already did this.
