@@ -7,6 +7,8 @@
 #include <math.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <time.h>
+#include <sqlite3.h>
 
 typedef struct { float O, H, L, C, V, J; uint32_t N; } Rec;
 static int bad = 0, ok = 0;
@@ -244,8 +246,74 @@ static void check_fill(void)
     series_close(&s); unlink(p);
 }
 
+/* the database is authoritative except at the live edge: the last two minutes come from the collector's files, and so do the minutes the database lacks */
+static void check_database(void)
+{
+    const char *pdb = "/tmp/wincan-test.db", *pf = "/tmp/wincan-test6.bin";
+    unlink(pdb); unlink(pf);
+    long long t0 = ((long long)time(NULL) / 60 - 400) * 60000LL; long M0 = (long)(t0 / 60000);        /* recent: the database is looked at over the last days only */
+    sqlite3 *db; sqlite3_open(pdb, &db);
+    sqlite3_exec(db, "CREATE TABLE candles (pair TEXT, ts INTEGER, open REAL, high REAL, low REAL, close REAL, volume REAL)", 0, 0, 0);
+    sqlite3_exec(db, "BEGIN", 0, 0, 0);
+    char sql[256];
+    for (int i = 0; i < 180; i++) {
+        snprintf(sql, sizeof sql, "INSERT INTO candles VALUES ('TSTUSDT', %ld, %d, %d, %d, %d, 10)", (M0 + i) * 60, 1000 + i, 1002 + i, 999 + i, 1001 + i);
+        sqlite3_exec(db, sql, 0, 0, 0);
+    }
+    sqlite3_exec(db, "COMMIT", 0, 0, 0);
+    /* the collector's file: the last 30 minutes (150..179), a price of 200 + (minute - 150) in each */
+    FILE *f = fopen(pf, "wb");
+    for (int i = 0; i < 18000; i++) {
+        if (i % 600 == 0) marker(f, t0 + (150LL * 60000) + (long long)i * 100LL);
+        Rec r; r.O = r.H = r.L = r.C = (float)(200 + i / 600); r.V = 1; r.J = 0; r.N = 1; frame(f, &r);
+    }
+    fclose(f);
+    set_mtime(pf, t0 + 180LL * 60000);
+    Series sf, sd; series_open(&sf, pf, 20000); series_tail(&sf, 20000); while (series_history(&sf, 400000)) ;
+    CHECK("db: open", series_open_db(&sd, pdb, "TSTUSDT", 20000) == 0);
+    CHECK("db: tail", series_tail(&sd, 0) == 0);
+    while (series_history(&sd, 0)) ;
+    Series *l[3] = { &sf, &sd, NULL };
+    Out o; series_queryN(l, 3, 1, 200, t0 + 180LL * 60000, &o);
+    int ok1 = 0, ok2 = 0, ok3 = 0, ok4 = 0;
+    for (int i = 0; i < o.n; i++) {
+        long m = (long)(o.t[i] / 60) - M0;
+        if (m == 100) ok1 = fabs(o.o[i] - 1100) < 1e-3 && fabs(o.c[i] - 1101) < 1e-3;             /* old, in both: the database */
+        if (m == 160) ok2 = fabs(o.o[i] - 1160) < 1e-3;                                           /* in both, not at the edge: the database */
+        if (m == 178) ok3 = fabs(o.c[i] - 228) < 1e-3;                                            /* at the live edge: the file */
+        if (m == 179) ok4 = fabs(o.c[i] - 229) < 1e-3;
+    }
+    CHECK("db: an old minute from the database", ok1);
+    CHECK("db: a recent minute that the database has, from the database", ok2);
+    CHECK("db: the last two minutes from the ticks", ok3 && ok4);
+    /* the database lags: rows only up to minute 139: the minutes after come from the file, and where neither has any there is no bar */
+    sqlite3_exec(db, "DELETE FROM candles WHERE ts >= (SELECT MIN(ts) FROM candles) + 140 * 60", 0, 0, 0);
+    Series sd2; series_open_db(&sd2, pdb, "TSTUSDT", 20000); series_tail(&sd2, 0); while (series_history(&sd2, 0)) ;
+    Series *l2[3] = { &sf, &sd2, NULL };
+    series_queryN(l2, 3, 1, 200, t0 + 180LL * 60000, &o);
+    int has145 = 0, ok155 = 0, ok139 = 0;
+    for (int i = 0; i < o.n; i++) {
+        long m = (long)(o.t[i] / 60) - M0;
+        if (m == 145) has145 = 1;
+        if (m == 155) ok155 = fabs(o.c[i] - 205) < 1e-3;
+        if (m == 139) ok139 = fabs(o.o[i] - 1139) < 1e-3;
+    }
+    CHECK("db lag: no bar where neither source has one", !has145);
+    CHECK("db lag: the file fills in after the database's last row", ok155 && ok139);
+    /* the database grows: a refresh picks up the new rows */
+    snprintf(sql, sizeof sql, "INSERT INTO candles VALUES ('TSTUSDT', %ld, 1500, 1502, 1499, 1501, 10)", (M0 + 140) * 60);
+    sqlite3_exec(db, sql, 0, 0, 0);
+    sd2.last_check_ms = 0;
+    CHECK("db: refresh", series_refresh(&sd2) == 0);
+    series_queryN(l2, 3, 1, 200, t0 + 180LL * 60000, &o);
+    int ok140 = 0; for (int i = 0; i < o.n; i++) if ((long)(o.t[i] / 60) - M0 == 140) ok140 = fabs(o.o[i] - 1500) < 1e-3;
+    CHECK("db: a new row is seen after a refresh", ok140);
+    series_close(&sf); series_close(&sd); series_close(&sd2); sqlite3_close(db); unlink(pdb); unlink(pf);
+}
+
 int main(void)
 {
+    check_database();
     check_fill();
     check_range();
     check_garbage();

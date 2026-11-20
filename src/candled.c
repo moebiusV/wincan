@@ -23,10 +23,13 @@
 #include <netinet/tcp.h>
 #include <stdint.h>
 #include <arpa/inet.h>
+#include <sqlite3.h>
 
-#define MAX_PAIRS 256
-static const char *dir = ".", *dir2 = NULL;      /* the primary files (perps), and the backfill (spot) for the time before the primary has data */
-typedef struct { char name[24]; Series a, b; int has_a, has_b; time_t checked; volatile int64_t last_req_ms, last_refresh_ms; } Coin;
+#define MAX_PAIRS 512
+static const char *dir = ".", *dir2 = NULL, *dbpath = NULL;      /* the files of the live collector, the backfill files (spot), and the database whose candles table is authoritative */
+/* the sources of a coin, in order: the live files, the database, the backfill files */
+typedef struct { char name[24]; Series s[3]; int has[3]; time_t checked; volatile int64_t last_req_ms, last_refresh_ms; } Coin;
+static char dbnames[MAX_PAIRS][24]; static int ndbnames; static pthread_mutex_t dbnames_mu = PTHREAD_MUTEX_INITIALIZER;
 static Coin coins[MAX_PAIRS];
 static int ncoins;
 static pthread_mutex_t reg = PTHREAD_MUTEX_INITIALIZER;
@@ -35,10 +38,11 @@ static int64_t now_ms(void) { struct timespec t; clock_gettime(CLOCK_REALTIME, &
 
 static void refresh_coin(Coin *c)
 {
-    if (c->has_a) series_refresh(&c->a);
-    if (c->has_b) series_refresh(&c->b);
+    for (int i = 0; i < 3; i++) if (c->has[i]) series_refresh(&c->s[i]);
     c->last_refresh_ms = now_ms();
 }
+
+static void coin_list(Coin *c, Series **l) { for (int i = 0; i < 3; i++) l[i] = c->has[i] ? &c->s[i] : NULL; }
 
 /*
  * The upkeep of the rolling windows, apart from the requests: every loaded pair is brought up to date once a minute, and a pair that someone has asked
@@ -87,6 +91,48 @@ static int open_series(Series *s, const char *d, const char *name)
     return 1;
 }
 
+/* open the pair of a coin in the database (BTC is BTCUSDT there): the newest three days at once, the rest in a background thread */
+static int open_db_series(Series *s, const char *name)
+{
+    char pair[40]; snprintf(pair, sizeof pair, "%sUSDT", name);
+    if (series_open_db(s, dbpath, pair, SERIES_CAP) != 0) return 0;
+    if (series_tail(s, 0) != 0) { series_close(s); return 0; }
+    pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_create(&th, &at, history_thread, s);
+    pthread_attr_destroy(&at);
+    return 1;
+}
+
+/* the pairs that the database has candles for recently, once at the start and then every hour (the query takes a while on a big database) */
+static void *dbnames_thread(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        sqlite3 *db = NULL;
+        if (sqlite3_open_v2(dbpath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, NULL) == SQLITE_OK) {
+            sqlite3_busy_timeout(db, 5000);
+            sqlite3_stmt *st;
+            if (sqlite3_prepare_v2(db, "SELECT pair FROM candles_kucoin_futures WHERE ts > ?1 GROUP BY pair ORDER BY pair", -1, &st, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(st, 1, (sqlite3_int64)time(NULL) - 3 * 86400);
+                char names[MAX_PAIRS][24]; int n = 0;
+                while (sqlite3_step(st) == SQLITE_ROW && n < MAX_PAIRS) {
+                    const char *p = (const char *)sqlite3_column_text(st, 0);
+                    size_t l = p ? strlen(p) : 0;
+                    if (l < 5 || l - 4 > 16 || strcmp(p + l - 4, "USDT")) continue;
+                    char nm[24]; memcpy(nm, p, l - 4); nm[l - 4] = 0;
+                    if (!valid_pair(nm)) continue;
+                    memcpy(names[n++], nm, strlen(nm) + 1);
+                }
+                sqlite3_finalize(st);
+                pthread_mutex_lock(&dbnames_mu); memcpy(dbnames, names, sizeof names); ndbnames = n; pthread_mutex_unlock(&dbnames_mu);
+            }
+            sqlite3_close(db);
+        }
+        sleep(3600);
+    }
+    return NULL;
+}
+
 /* find or create the coin of a pair; a primary file that appears later (the perp collector started after this server) is picked up within ten seconds */
 static Coin *coin_get(const char *name)
 {
@@ -98,16 +144,18 @@ static Coin *coin_get(const char *name)
         c = &coins[ncoins];
         memset(c, 0, sizeof *c);
         snprintf(c->name, sizeof c->name, "%s", name);
-        c->has_a = open_series(&c->a, dir, name);
-        c->has_b = dir2 ? open_series(&c->b, dir2, name) : 0;
-        if (!c->has_a && !c->has_b) { pthread_mutex_unlock(&reg); return NULL; }
+        c->has[0] = open_series(&c->s[0], dir, name);
+        c->has[1] = dbpath ? open_db_series(&c->s[1], name) : 0;
+        c->has[2] = dir2 ? open_series(&c->s[2], dir2, name) : 0;
+        if (!c->has[0] && !c->has[1] && !c->has[2]) { pthread_mutex_unlock(&reg); return NULL; }
+        refresh_coin(c);                                          /* opening the sources took a while: bring them up to date before the first answer */
         c->checked = time(NULL); c->last_req_ms = c->last_refresh_ms = now_ms();
         __sync_synchronize();
         ncoins++;
-    } else if ((!c->has_a || (dir2 && !c->has_b)) && time(NULL) - c->checked > 10) {
+    } else if ((!c->has[0] || (dir2 && !c->has[2])) && time(NULL) - c->checked > 10) {
         c->checked = time(NULL);
-        if (!c->has_a) c->has_a = open_series(&c->a, dir, name);
-        if (dir2 && !c->has_b) c->has_b = open_series(&c->b, dir2, name);
+        if (!c->has[0]) c->has[0] = open_series(&c->s[0], dir, name);
+        if (dir2 && !c->has[2]) c->has[2] = open_series(&c->s[2], dir2, name);
     }
     pthread_mutex_unlock(&reg);
     return c;
@@ -146,7 +194,15 @@ static int pairs_json(char *buf, size_t cap)
     PairEnt list[MAX_PAIRS]; int n = 0;
     scan_dir(dir, list, &n);
     if (dir2) scan_dir(dir2, list, &n);
-    qsort(list, (size_t)n, sizeof list[0], by_mtime_desc);
+    qsort(list, (size_t)n, sizeof list[0], by_mtime_desc);            /* the coins with live files first, the most recently written first */
+    if (dbpath) {                                                       /* then the others that the database has, by name */
+        pthread_mutex_lock(&dbnames_mu);
+        for (int i = 0; i < ndbnames && n < MAX_PAIRS; i++) {
+            int k; for (k = 0; k < n; k++) if (!strcmp(list[k].n, dbnames[i])) break;
+            if (k == n) { memcpy(list[n].n, dbnames[i], strlen(dbnames[i]) + 1); list[n].t = 0; n++; }
+        }
+        pthread_mutex_unlock(&dbnames_mu);
+    }
     int o = snprintf(buf, cap, "[");
     for (int i = 0; i < n; i++) o += snprintf(buf + o, cap - (size_t)o, "%s\"%s\"", i ? "," : "", list[i].n);
     o += snprintf(buf + o, cap - (size_t)o, "]");
@@ -225,7 +281,7 @@ static int handle(int fd, char *body, size_t bodycap, Out *out)
         if (!c) { respond(fd, 404, "Not Found", "{\"error\":\"no such pair\"}", 24); return 1; }
         { int64_t t = now_ms(); if (t - c->last_req_ms >= 5000) refresh_coin(c);       /* nobody was watching: it is up to a minute old */
           c->last_req_ms = t; }
-        series_query2(c->has_a ? &c->a : NULL, c->has_b ? &c->b : NULL, tf, n, now_ms(), out);
+        { Series *l[3]; coin_list(c, l); series_queryN(l, 3, tf, n, now_ms(), out); }
         char sig[24]; signature(out, sig);
         if (seen[0] && !strcmp(seen, sig)) {                       /* nothing changed since the client's last answer: a few bytes only */
             int u = snprintf(body, bodycap, "{\"pair\":\"%s\",\"tf\":\"%s\",\"unchanged\":true,\"sig\":\"%s\",\"price\":%.8g,\"age_ms\":%lld,\"complete\":%s}",
@@ -251,7 +307,7 @@ static int handle(int fd, char *body, size_t bodycap, Out *out)
         Coin *c = coin_get(pair);
         if (!c) { respond(fd, 404, "Not Found", "{\"error\":\"no such pair\"}", 24); return 1; }
         { int64_t t = now_ms(); if (t - c->last_req_ms >= 5000) refresh_coin(c); c->last_req_ms = t; }
-        Range r; series_range2(c->has_a ? &c->a : NULL, c->has_b ? &c->b : NULL, atoll(ss), &r);
+        Range r; { Series *l[3]; coin_list(c, l); series_rangeN(l, 3, atoll(ss), &r); }
         int o = snprintf(body, bodycap, "{\"pair\":\"%s\",\"since\":%lld,\"n\":%d,\"high\":%.8g,\"high_t\":%lld,\"low\":%.8g,\"low_t\":%lld,\"price\":%.8g}",
                          pair, (long long)atoll(ss), r.n, r.high, (long long)r.high_t, r.low, (long long)r.low_t, (double)r.price);
         respond(fd, 200, "OK", body, o);
@@ -284,10 +340,11 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dir") && i + 1 < argc) dir = argv[++i];
         else if (!strcmp(argv[i], "--backfill") && i + 1 < argc) dir2 = argv[++i];
+        else if (!strcmp(argv[i], "--db") && i + 1 < argc) dbpath = argv[++i];
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bind") && i + 1 < argc) bind_addr = argv[++i];
         else if (!strcmp(argv[i], "--version")) { puts("candled " PACKAGE_VERSION); return 0; }
-        else { fprintf(stderr, "usage: candled --dir DIR [--backfill DIR] [--port N] [--bind ADDR]\n"); return 2; }
+        else { fprintf(stderr, "usage: candled --dir DIR [--db FILE] [--backfill DIR] [--port N] [--bind ADDR]\n"); return 2; }
     }
     signal(SIGPIPE, SIG_IGN);
     int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
@@ -296,7 +353,8 @@ int main(int argc, char **argv)
     if (inet_pton(AF_INET, bind_addr, &a.sin_addr) != 1) { fprintf(stderr, "candled: bad address %s\n", bind_addr); return 2; }
     if (bind(ls, (struct sockaddr *)&a, sizeof a) < 0 || listen(ls, 16) < 0) { perror("candled: bind"); return 1; }
     { pthread_t rt; pthread_attr_t ra; pthread_attr_init(&ra); pthread_attr_setdetachstate(&ra, PTHREAD_CREATE_DETACHED); pthread_create(&rt, &ra, refresher, NULL); pthread_attr_destroy(&ra); }
-    fprintf(stderr, "candled: serving %s%s%s on %s:%d\n", dir, dir2 ? " backfilled from " : "", dir2 ? dir2 : "", bind_addr, port);
+    if (dbpath) { pthread_t dt; pthread_attr_t da; pthread_attr_init(&da); pthread_attr_setdetachstate(&da, PTHREAD_CREATE_DETACHED); pthread_create(&dt, &da, dbnames_thread, NULL); pthread_attr_destroy(&da); }
+    fprintf(stderr, "candled: serving %s%s%s%s%s on %s:%d\n", dir, dbpath ? ", the candles of " : "", dbpath ? dbpath : "", dir2 ? ", backfilled from " : "", dir2 ? dir2 : "", bind_addr, port);
     for (;;) {
         int fd = accept(ls, NULL, NULL);
         if (fd < 0) { if (errno == EINTR) continue; perror("accept"); sleep(1); continue; }

@@ -231,7 +231,7 @@ int series_open_db(Series *s, const char *dbpath, const char *dbpair, int cap)
 static int db_load(Series *s, int64_t lo, int64_t hi, int64_t *last_ts, float *last_close_out)
 {
     sqlite3_stmt *st;
-    if (sqlite3_prepare_v2((sqlite3 *)s->db, "SELECT ts, open, high, low, close, volume FROM candles_kucoin_futures WHERE pair=?1 AND ts>=?2 AND ts<?3 ORDER BY ts", -1, &st, NULL) != SQLITE_OK) return -1;
+    if (sqlite3_prepare_v2((sqlite3 *)s->db, "SELECT ts, open, high, low, close, volume FROM candles WHERE pair=?1 AND ts>=?2 AND ts<?3 ORDER BY ts", -1, &st, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(st, 1, s->dbpair, -1, SQLITE_STATIC);
     sqlite3_bind_int64(st, 2, lo); sqlite3_bind_int64(st, 3, hi);
     enum { CH = 20000 };
@@ -268,12 +268,18 @@ static int db_load(Series *s, int64_t lo, int64_t hi, int64_t *last_ts, float *l
 static int db_tail(Series *s)
 {
     sqlite3_stmt *st;
-    if (sqlite3_prepare_v2((sqlite3 *)s->db, "SELECT MAX(ts), MIN(ts) FROM candles_kucoin_futures WHERE pair=?1", -1, &st, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(st, 1, s->dbpair, -1, SQLITE_STATIC);
+    /* the newest row, looked for in a bounded range: MAX(ts) over the whole view takes many seconds (it checks every row against the other tables), a range is instant */
     int64_t last = 0, first = 0; int ok = 0;
-    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_type(st, 0) != SQLITE_NULL) { last = sqlite3_column_int64(st, 0); first = sqlite3_column_int64(st, 1); ok = 1; }
-    sqlite3_finalize(st);
+    static const int DAYS[3] = { 10, 60, 450 };
+    for (int d = 0; d < 3 && !ok; d++) {
+        if (sqlite3_prepare_v2((sqlite3 *)s->db, "SELECT MAX(ts) FROM candles WHERE pair=?1 AND ts>=?2", -1, &st, NULL) != SQLITE_OK) return -1;
+        sqlite3_bind_text(st, 1, s->dbpair, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(st, 2, (sqlite3_int64)time(NULL) - (int64_t)DAYS[d] * 86400);
+        if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_type(st, 0) != SQLITE_NULL) { last = sqlite3_column_int64(st, 0); ok = 1; }
+        sqlite3_finalize(st);
+    }
     if (!ok) return -1;
+    first = 0;                                                       /* the oldest row is not looked up: the history goes back as far as the window kept (416 days) */
     pthread_mutex_lock(&s->mu);
     memset(s->bars, 0, (size_t)s->cap * sizeof(Bar));
     s->base_min = floor_div(last, 60) - (s->cap - 1024);
@@ -310,8 +316,9 @@ static int db_refresh(Series *s)
     if (now - s->last_check_ms < 5000) return 0;                       /* a database is asked at most every five seconds */
     s->last_check_ms = now;
     int64_t lt = s->db_last_ts; float lc = s->price;
-    int n = db_load(s, s->db_last_ts, INT64_MAX, &lt, &lc);            /* from the newest row we have: it may have been rewritten */
-    if (n > 0) { pthread_mutex_lock(&s->mu); s->db_last_ts = lt; s->next_ms = (lt + 60) * 1000; s->price = lc; pthread_mutex_unlock(&s->mu); }
+    /* from three hours before the newest row we have: the newest may have been rewritten, and the database fills in minutes behind its newest row later */
+    int n = db_load(s, s->db_last_ts - 3 * 3600, INT64_MAX, &lt, &lc);
+    if (n > 0 && lt >= s->db_last_ts) { pthread_mutex_lock(&s->mu); s->db_last_ts = lt; s->next_ms = (lt + 60) * 1000; s->price = lc; pthread_mutex_unlock(&s->mu); }
     return n < 0 ? -1 : 0;
 }
 
@@ -426,9 +433,14 @@ static int64_t last_minute(const Series *s)
     return INT64_MIN;
 }
 
-/* the minute from the first series that has it; the first minute of a file that began mid-minute only if nothing else has that minute */
-static const Bar *pick(Series **l, int n, int64_t m)
+/*
+ * The minute from the first series that has it, the first minute of a file that began mid-minute only if nothing else has it.  A database is
+ * authoritative for every minute it has except those at the live edge (the last two minutes of all the data), where the ticks of the collector
+ * are used: the database may not have them yet, or not in their final form.
+ */
+static const Bar *pick(Series **l, int n, int64_t m, int live)
 {
+    if (!live) for (int i = 0; i < n; i++) if (l[i] && l[i]->is_db) { const Bar *b = bar_at(l[i], m); if (b) return b; }
     const Bar *partial = NULL;
     for (int i = 0; i < n; i++) {
         const Bar *b = bar_at(l[i], m);
@@ -467,7 +479,7 @@ void series_queryN(Series **l, int cnt, int tf, int n, int64_t now_ms, Out *out)
             float o = 0, h = 0, lo2 = 0, c = 0, v = 0; int got = 0;
             if (key + step - 1 < oldest) break;                              /* past the oldest bar */
             for (int64_t m = key; m < key + step; m++) {
-                const Bar *bb = pick(l, cnt, m);
+                const Bar *bb = pick(l, cnt, m, m >= lastmin - 1);
                 if (!bb) continue;
                 if (!got) { o = bb->o; h = bb->h; lo2 = bb->l; got = 1; } else { if (bb->h > h) h = bb->h; if (bb->l < lo2) lo2 = bb->l; }
                 c = bb->c; v += bb->v;
@@ -501,7 +513,7 @@ void series_rangeN(Series **l, int cnt, int64_t since_sec, Range *r)
         int64_t first = floor_div(since_sec, 60);
         if (first < oldest) first = oldest;
         for (int64_t m = first; m <= last; m++) {
-            const Bar *bb = pick(l, cnt, m);
+            const Bar *bb = pick(l, cnt, m, m >= last - 1);
             if (!bb) continue;
             if (r->n == 0 || bb->h > r->high) { r->high = bb->h; r->high_t = m * 60; }
             if (r->n == 0 || bb->l < r->low)  { r->low = bb->l;  r->low_t = m * 60; }

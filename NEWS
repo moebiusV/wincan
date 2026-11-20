@@ -15,3 +15,4 @@ wincan 0.1.0 (2026-11-20)
   candled keeps every loaded pair's windows up to date in the background (a minute for all, 100 ms for the one being watched) and has /range for the highest and lowest since a time.
   Candles: forward-filled 100 ms candles no longer make a minute's open, high or low; garbage frames are ignored.
   The position editor has leverage and realized P&L as well (it opens at the box last edited and can be reopened until x closes the trade); the percentage shown is the return on the margin, the dollars include what was realized; the trade log has the new columns.
+  candled --db FILE reads a database of 1-minute candles (authoritative except for the last two minutes, where the ticks are used); wincan shows the unrealized profit and its return on the initial margin as its large figures and the realized and net apart, as KuCoin does; the server address is kept so that a slow lookup of a .local name no longer shows as no connection.

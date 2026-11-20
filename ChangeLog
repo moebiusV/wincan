@@ -7,3 +7,4 @@
 2026-11-20  The price line takes the colour of the forming candle; the highest high and lowest low of the bars on show are marked by a dotted line across the window with the value at the left.
 2026-11-20  Candle bodies have an odd width so that the wick is in the middle; the forming candle is two pixels wider and centred on its wick; --scale for tests.
 2026-11-20  Position editor: leverage and realized P&L, resumes at the last box; figures on margin; the log has leverage, margin, realized, total and ROE.
+2026-11-20  candled --db (a candle database candles, authoritative but for the live edge; bounded queries); figures as KuCoin's; the server's address cached in wincan.ini.

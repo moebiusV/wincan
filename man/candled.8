@@ -5,7 +5,7 @@ candled \- serve candles from a collector's binary files, as JSON
 .B candled
 .B \-\-dir
 .I DIR
-[\fB\-\-backfill\fR \fIDIR\fR] [\fB\-\-port\fR \fIN\fR] [\fB\-\-bind\fR \fIADDRESS\fR]
+[\fB\-\-db\fR \fIFILE\fR] [\fB\-\-backfill\fR \fIDIR\fR] [\fB\-\-port\fR \fIN\fR] [\fB\-\-bind\fR \fIADDRESS\fR]
 .SH DESCRIPTION
 .B candled
 reads the files
@@ -37,6 +37,13 @@ appended.  The timeframes 1m 3m 5m 15m 30m 1h 4h 1d 1w are made from the minute 
 .TP
 .BI \-\-dir " DIR"
 the directory of the .bin files (default: the current directory).
+.TP
+.BI \-\-db " FILE"
+a SQLite database with a table or view
+.B candles
+(pair, ts in seconds, open, high, low, close, volume) of 1\-minute candles, such as a collector's candle database (pairs are named BTCUSDT there, BTC here).  It is read\-only and is authoritative for every minute it has except the last two minutes of all the data, which come from the ticks in
+.BR \-\-dir :
+the database may not have them yet, or not in their final form.  Minutes it lacks (it may be filled in batches, once an hour) come from the files.  The pairs it has recent candles for are listed after the pairs of the files.  Volumes from the database are in the database's own unit.  It is asked at most every five seconds, from three hours before its newest row so that rows filled in late are seen.
 .TP
 .BI \-\-backfill " DIR"
 a second directory of .bin files (for example the spot candles while

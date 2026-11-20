@@ -30,7 +30,7 @@
 #define IDM_SHOW    100
 #define IDM_EXIT    101
 #define MAX_BARS    500
-#define MAX_PAIRS   256
+#define MAX_PAIRS   512
 #define BASE_W      300
 #define BASE_H      175
 
@@ -123,6 +123,10 @@ static void save_all(void)
     WritePrivateProfileStringA("wincan", "tf", TFS[A.tf], A.ini);
     snprintf(b, sizeof b, "%d", A.scale); WritePrivateProfileStringA("wincan", "scale", b, A.ini);
     { char ef[8]; snprintf(ef, sizeof ef, "%d", A.field_last); WritePrivateProfileStringA("wincan", "editfield", ef, A.ini); }
+    if (A.ip[0]) {                                              /* the server's address: used at once next time, without a lookup of its name (only for the same server setting) */
+        char sv[200]; snprintf(sv, sizeof sv, "%s:%d", A.host, A.port);
+        WritePrivateProfileStringA("wincan", "serverip", A.ip, A.ini); WritePrivateProfileStringA("wincan", "serverip_for", sv, A.ini);
+    }
     WritePrivateProfileStringA("wincan", "bollinger", A.ind[0] ? "1" : "0", A.ini);
     WritePrivateProfileStringA("wincan", "ma9", A.ind[1] ? "1" : "0", A.ini);
     WritePrivateProfileStringA("wincan", "ma200", A.ind[2] ? "1" : "0", A.ini);
@@ -174,7 +178,7 @@ static char *http_get(const char *path)
         MultiByteToWideChar(CP_UTF8, 0, A.ip[0] ? A.ip : A.host, -1, whost, 160);
         g_sess = WinHttpOpen(L"wincan/0.1", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
         if (!g_sess) return NULL;
-        WinHttpSetTimeouts(g_sess, 3000, 3000, 3000, 5000);
+        WinHttpSetTimeouts(g_sess, 10000, 3000, 3000, 5000);          /* the lookup of a .local name takes up to several seconds, now and then */
         g_conn = WinHttpConnect(g_sess, whost, (INTERNET_PORT)A.port, 0);
         if (!g_conn) { http_close(); return NULL; }
     }
@@ -264,7 +268,7 @@ static void iso(long long t, char *out, size_t cap)
 /* the best and worst of the trade as a percentage from the entry and in dollars: the highest and lowest price since entry, the entry itself and the exit counting */
 /* a position's figures at a price: the profit or loss in dollars (the move times the size, then what was already realized), the margin tied up (the value divided
  * by the leverage; the whole value if no leverage is given) and the return on that margin, in per cent */
-typedef struct { double unreal, total, margin, pct; } Fig;
+typedef struct { double unreal, total, margin, pct, pct_unreal; } Fig;
 static Fig figures(const Position *p, double price)
 {
     Fig f;
@@ -272,6 +276,7 @@ static Fig figures(const Position *p, double price)
     double notional = p->entry * fabs(p->size);
     f.margin = p->leverage > 0 ? notional / p->leverage : notional;
     f.pct = f.margin > 0 ? f.total / f.margin * 100.0 : 0;
+    f.pct_unreal = f.margin > 0 ? f.unreal / f.margin * 100.0 : 0;
     return f;
 }
 
@@ -333,11 +338,11 @@ static void do_close(void)
 static DWORD WINAPI worker(LPVOID arg)
 {
     (void)arg;
-    DWORD last_pairs = 0, last_resolve = 0;
+    DWORD last_pairs = 0;
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
     static double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS];
     while (!A.quit) {
-        if (!A.ip[0] || GetTickCount() - last_resolve > 300000) { resolve(); last_resolve = GetTickCount(); }
+        if (!A.ip[0]) resolve();          /* the address is looked up only when none is known (it is kept in the settings) and after a failure */
         DWORD now = GetTickCount();
         if (A.close_req) { A.close_req = 0; do_close(); PostMessage(A.hwnd, WM_DATA, 0, 0); }
         if (last_pairs == 0 || now - last_pairs > 60000) { fetch_pairs(); last_pairs = now; PostMessage(A.hwnd, WM_DATA, 0, 0); }
@@ -354,9 +359,10 @@ static DWORD WINAPI worker(LPVOID arg)
         if (incremental) snprintf(path, sizeof path, "/candles?pair=%s&tf=%s&n=2&sig=%s", pair, TFS[tf], sig);
         else snprintf(path, sizeof path, "/candles?pair=%s&tf=%s&n=%d", pair, TFS[tf], bars);
         char *b = http_get(path);
-        if (!b) { if (!A.ip[0]) resolve(); b = http_get(path); }                  /* the connection was lost (a restarted server, say): once more at once, over a new one */
+        if (!b) { resolve(); b = http_get(path); }                                /* the connection was lost (a restarted server, say) or the address changed: look the name up anew and try once more */
         EnterCriticalSection(&A.cs);
         if (b) {
+            { static char saved_ip[64]; if (A.ip[0] && strcmp(saved_ip, A.ip)) { snprintf(saved_ip, sizeof saved_ip, "%s", A.ip); PostMessage(A.hwnd, WM_APP + 4, 0, 0); } }
             double price = get_num(b, "price"), age = get_num(b, "age_ms"); int complete = strstr(b, "\"complete\":true") != NULL;
             char nsig[24] = ""; get_str(b, "sig", nsig, sizeof nsig);
             int slot = find_slot(pair, tf);
@@ -588,8 +594,8 @@ static void paint(HDC dc, int W, int H)
         }
         text(dc, fs, COL_DIM, U(8), y0 + U(4) + 4 * U(19) + U(2), "Tab: next   Enter or mouse out: done   Esc: cancel", 0);
     } else if (pos.entry > 0 && pos.size != 0 && n > 0) {
-        Fig fg = figures(&pos, price);                           /* dollars: the move times the size plus what was realized; per cent: of the margin */
-        double usd = fg.total, pct = fg.pct;
+        Fig fg = figures(&pos, price);                           /* as KuCoin's panel: the unrealized profit and its return on the initial margin (value / leverage); the realized is shown apart */
+        double usd = fg.unreal, pct = fg.pct_unreal;
         COLORREF col = usd > 0 ? COL_UP : usd < 0 ? COL_DOWN : COL_TXT;
         snprintf(buf, sizeof buf, "%+.2f%%", pct); fmt_money(usd, buf2, sizeof buf2);
         text(dc, fp, col, U(6), fy, buf, 0);
@@ -597,9 +603,9 @@ static void paint(HDC dc, int W, int H)
         if (A.active) text(dc, fs, COL_DIM, U(6), fy + U(22), "up/down time  left/right coin  e position  x close  q quit", 0);
         else {
             fmt_price(pos.entry, buf, sizeof buf);
-            char lv[16] = "", rl[24] = "";
+            char lv[16] = "", rl[48] = "";
             if (pos.leverage > 0) snprintf(lv, sizeof lv, "  %.4gx", pos.leverage);
-            if (pos.realized != 0) snprintf(rl, sizeof rl, "  real %+.0f", pos.realized);
+            if (pos.realized != 0) snprintf(rl, sizeof rl, "  real %+.2f  net %+.2f", pos.realized, fg.total);
             if (pos.have_range) { double mfe, mae, a1, a2; excursions(&pos, pos.hi > price ? pos.hi : price, pos.lo < price ? pos.lo : price, &mfe, &mae, &a1, &a2);
                 snprintf(buf2, sizeof buf2, "%.6g @ %s%s%s  best %+.1f%% worst %+.1f%%", pos.size, buf, lv, rl, mfe, mae); }
             else snprintf(buf2, sizeof buf2, "%.6g @ %s%s%s", pos.size, buf, lv, rl);
@@ -899,6 +905,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         return 0;
     case WM_HOTKEY: show_hide(A.hidden); return 0;
+    case WM_APP + 4: save_all(); return 0;                     /* the server's address worked: keep it */
     case WM_SHOWIT: show_hide(1); return 0;                    /* a second copy was started and found this one: show it */
     case WM_TRAY:
         if (l == WM_LBUTTONUP) show_hide(A.hidden);
@@ -932,13 +939,15 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     GetPrivateProfileStringA("wincan", "pair", "BTC", A.pair, sizeof A.pair, A.ini);
     char tfs[8]; GetPrivateProfileStringA("wincan", "tf", "5m", tfs, sizeof tfs, A.ini);
     A.tf = 2; for (int i = 0; i < NTF; i++) if (!strcmp(tfs, TFS[i])) A.tf = i;
+    { char ipb[64] = "", forb[200] = "", now_sv[200]; GetPrivateProfileStringA("wincan", "serverip", "", ipb, sizeof ipb, A.ini); GetPrivateProfileStringA("wincan", "serverip_for", "", forb, sizeof forb, A.ini);
+      snprintf(now_sv, sizeof now_sv, "%s:%d", A.host, A.port); if (!strcmp(forb, now_sv)) snprintf(A.ip, sizeof A.ip, "%s", ipb); }
     A.field_last = GetPrivateProfileIntA("wincan", "editfield", 0, A.ini); A.ind[0] = GetPrivateProfileIntA("wincan", "bollinger", 1, A.ini); A.ind[1] = GetPrivateProfileIntA("wincan", "ma9", 1, A.ini); A.ind[2] = GetPrivateProfileIntA("wincan", "ma200", 1, A.ini); A.hover = -1;
     A.scale = GetPrivateProfileIntA("wincan", "scale", 100, A.ini); if (A.scale < 75 || A.scale > 400) A.scale = 100;
     int server_given = 0, argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; i++) {
         char a[256]; WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, a, sizeof a, NULL, NULL);
         char nx[256] = ""; if (i + 1 < argc) WideCharToMultiByte(CP_UTF8, 0, argv[i + 1], -1, nx, sizeof nx, NULL, NULL);
-        if (!strcmp(a, "--server") && i + 1 < argc) { parse_server(nx); i++; server_given = 1; }
+        if (!strcmp(a, "--server") && i + 1 < argc) { parse_server(nx); i++; server_given = 1; A.ip[0] = 0; }
         else if (!strcmp(a, "--pair") && i + 1 < argc) { snprintf(A.pair, sizeof A.pair, "%s", nx); i++; }
         else if (!strcmp(a, "--tf") && i + 1 < argc) { for (int k = 0; k < NTF; k++) if (!strcmp(nx, TFS[k])) A.tf = k; i++; }
         else if (!strcmp(a, "--shot") && i + 1 < argc) { static char shot[260]; snprintf(shot, sizeof shot, "%s", nx); A.shot = shot; i++; }
