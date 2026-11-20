@@ -1,0 +1,72 @@
+.TH CANDLED 8 "November 2026" "candlewin" "System Administration"
+.SH NAME
+candled \- serve candles from a collector's binary files, as JSON
+.SH SYNOPSIS
+.B candled
+.B \-\-dir
+.I DIR
+[\fB\-\-port\fR \fIN\fR] [\fB\-\-bind\fR \fIADDRESS\fR]
+.SH DESCRIPTION
+.B candled
+reads the files
+.IR DIR/NAME.bin
+that a candle collector appends to continuously, aggregates them with rolling windows, and answers
+read\-only HTTP requests from
+.BR candlewin (1)
+and anything else that wants candles.  It writes nothing and keeps no secrets; it listens on all
+addresses unless
+.B \-\-bind
+is given, so put it behind a firewall that admits only the machines that should ask.
+.PP
+The files are streams of 30\-byte frames, each
+.B {
+(a brace), a 28\-byte payload and
+.BR } .
+A candle payload is
+.IR "float O, H, L, C, V, J; uint32 N" ,
+one for each 100 milliseconds.  A timestamp marker, once a minute, has N = 0xFFFFFFFF, V = \-1, J = NaN and the Unix time in
+seconds in the first four bytes; the next candle begins at that time.  A collector killed in mid\-write leaves a partial frame after
+which the frames sit at another offset, and
+.B candled
+finds them again by the pattern of three frames in a row.  A file that does not end on frames is not listed.
+.PP
+For each pair the first request reads the newest three days at once and a background thread then reads the rest
+of the file, newest part first, into a ring of 600000 one\-minute bars (416 days).  Each later request folds in only what has been
+appended.  The timeframes 1m 3m 5m 15m 30m 1h 4h 1d 1w are made from the minute bars on request, aligned to UTC (a week begins on Monday).
+.SH OPTIONS
+.TP
+.BI \-\-dir " DIR"
+the directory of the .bin files (default: the current directory).
+.TP
+.BI \-\-port " N"
+the TCP port (default 8766).
+.TP
+.BI \-\-bind " ADDRESS"
+an IPv4 address to listen on (default 0.0.0.0).
+.SH PROTOCOL
+Only GET.  Answers are JSON; errors are an object with an
+.B error
+member.
+.TP
+.B /pairs
+the names of the usable files, the most recently written first: \fB["BTC","ETH",...]\fR.
+.TP
+.B /candles?pair=BTC&tf=5m&n=60
+the last
+.I n
+bars (at most 500; a gap in the data leaves no bar) of a timeframe, oldest first, as
+.B {"pair","tf","price","age_ms","complete","n","t":[...],"o":[...],"h":[...],"l":[...],"c":[...],"v":[...]}.
+.B t
+is the start of each bar in seconds since the epoch;
+.B price
+is the last close;
+.B age_ms
+is the time since the collector's last candle (a collector that has stopped shows a growing age);
+.B complete
+is false while the older history is still being read.
+.SH LIMITS
+Without markers (the start of an old file, a stalled collector) the file's modification time stands for the end of the data.
+Bars older than the last interruption of the collector have their order and shape right but their clock times drift by the length of the gap.
+.SH SEE ALSO
+.BR candlewin (1),
+.BR candlewin (5)

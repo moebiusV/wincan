@@ -1,0 +1,66 @@
+.TH CANDLEWIN 1 "November 2026" "candlewin" "User Commands"
+.SH NAME
+candlewin \- a small frameless candle chart window for Windows
+.SH SYNOPSIS
+.B candlewin.exe
+[\fB\-\-server\fR \fIHOST:PORT\fR] [\fB\-\-pair\fR \fINAME\fR] [\fB\-\-tf\fR \fIFRAME\fR]
+.SH DESCRIPTION
+.B candlewin
+shows the candles and last price of one coin, from a
+.BR candled (8)
+server, in a 200 by 200 pixel window with no frame, border or title bar that stays on top of other windows.  It
+refreshes once a second.  If a position (an entry price and a size) is entered, it shows the profit or loss as a percentage and
+in dollars, green when ahead and red when behind, and draws the entry price as a dotted line.
+.SS Keyboard and focus
+The window never takes the keyboard by itself.  Click it (and drag to move it) to give it the keyboard; a blue border shows that it
+has it.  Move the mouse out of the window and it gives the keyboard back at once to the window that had it (except while an entry or
+size is being typed).
+.TP
+.B Up, Down
+the timeframe: 1m 3m 5m 15m 30m 1h 4h 1d 1w.
+.TP
+.B Left, Right
+the coin, in the order the server lists them.
+.TP
+.B e
+type the entry price; Enter accepts, Esc cancels.
+.TP
+.B s
+type the size in coins (negative for a short).
+.TP
+.B Delete
+clear the position of this coin.
+.TP
+.B t
+hide the window in the tray.
+.TP
+.B + , \-
+make the window larger or smaller (75% to 400%).
+.TP
+.B x
+exit.
+.TP
+.B Esc
+give the keyboard back.
+.SS Tray and Alt-Tab
+A tray icon shows or hides the window with a click; its menu has Exit.  Ctrl+Alt+C does the same from anywhere.  While shown the
+window is in Alt\-Tab and has a taskbar button, which minimizes it.  A window hidden in the tray is not in Alt\-Tab: use the icon
+or Ctrl+Alt+C.
+.SH OPTIONS
+.TP
+.BI \-\-server " HOST:PORT"
+the server (also kept in the settings file).
+.TP
+.BI \-\-pair " NAME" ", " \-\-tf " FRAME"
+start with this coin and timeframe.
+.TP
+.BI \-\-shot " FILE.bmp"
+draw once and write the picture to a file, then exit (for testing; with \fB\-\-shot\-position\fR \fIENTRY,SIZE\fR and \fB\-\-shot\-active\fR).
+.SH FILES
+.TP
+.B %APPDATA%\\candlewin\\candlewin.ini
+settings; see
+.BR candlewin (5).
+.SH SEE ALSO
+.BR candled (8),
+.BR candlewin (5)

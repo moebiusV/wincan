@@ -1,0 +1,4 @@
+candlewin 0.1.0 (2026-11-20)
+  First version: candled (JSON candles from the collector's framed .bin files, rolling aggregation, nine timeframes) and
+  candlewin.exe (frameless 200x200 always-on-top window, entry price and size with profit and loss in percent and dollars,
+  tray icon, hotkey, keyboard taken on click and given back when the mouse leaves).

@@ -1,0 +1,69 @@
+# Makefile for candlewin; written by ./configure from Makefile.in
+PACKAGE   = candlewin
+VERSION   = @VERSION@
+prefix    = @prefix@
+bindir    = $(prefix)/bin
+sbindir   = $(prefix)/sbin
+mandir    = $(prefix)/share/man
+CC        = @CC@
+WINCC     = @WINCC@
+HASWIN    = @HASWIN@
+CFLAGS   ?= -O2
+WARN      = -std=gnu11 -Wall -Wextra -DPACKAGE_VERSION='"$(VERSION)"'
+DISTFILES = AUTHORS COPYING ChangeLog INSTALL NEWS README VERSION configure Makefile.in \
+            src/agg.c src/agg.h src/candled.c src/candlewin.c tests/test_agg.c \
+            man/candled.8 man/candlewin.1 man/candlewin.5 contrib/candled.service
+
+TARGETS = candled
+ifeq ($(HASWIN),yes)
+TARGETS += candlewin.exe
+endif
+
+all: $(TARGETS)
+
+candled: src/candled.c src/agg.c src/agg.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ src/candled.c src/agg.c -lpthread
+
+candlewin.exe: src/candlewin.c
+	$(WINCC) $(CFLAGS) $(WARN) -mwindows -o $@ src/candlewin.c -lgdi32 -lwinhttp -lshell32 -luser32
+
+win: candlewin.exe
+
+test_agg: tests/test_agg.c src/agg.c src/agg.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ tests/test_agg.c src/agg.c -lm -lpthread
+
+check: test_agg
+	./test_agg
+
+install: all
+	install -d $(DESTDIR)$(sbindir) $(DESTDIR)$(bindir) $(DESTDIR)$(mandir)/man8 $(DESTDIR)$(mandir)/man1 $(DESTDIR)$(mandir)/man5
+	install -m 755 candled $(DESTDIR)$(sbindir)/candled
+	[ ! -f candlewin.exe ] || install -m 755 candlewin.exe $(DESTDIR)$(bindir)/candlewin.exe
+	install -m 644 man/candled.8 $(DESTDIR)$(mandir)/man8/candled.8
+	install -m 644 man/candlewin.1 $(DESTDIR)$(mandir)/man1/candlewin.1
+	install -m 644 man/candlewin.5 $(DESTDIR)$(mandir)/man5/candlewin.5
+
+uninstall:
+	rm -f $(DESTDIR)$(sbindir)/candled $(DESTDIR)$(bindir)/candlewin.exe \
+	      $(DESTDIR)$(mandir)/man8/candled.8 $(DESTDIR)$(mandir)/man1/candlewin.1 $(DESTDIR)$(mandir)/man5/candlewin.5
+
+# copy the sources to the machine with the candle files and build the server there:  make deploy HOST=name [DIR=candlewin]
+DIR = candlewin
+deploy:
+	@[ -n "$(HOST)" ] || { echo "usage: make deploy HOST=name"; exit 2; }
+	tar cf - src configure Makefile.in VERSION | ssh -T $(HOST) 'mkdir -p $(DIR) && cd $(DIR) && tar xf - && ./configure --prefix=$$HOME/.local >/dev/null && make candled'
+
+dist: $(DISTFILES)
+	rm -rf $(PACKAGE)-$(VERSION)
+	mkdir $(PACKAGE)-$(VERSION)
+	tar cf - $(DISTFILES) | (cd $(PACKAGE)-$(VERSION) && tar xf -)
+	tar czf $(PACKAGE)-$(VERSION).tar.gz $(PACKAGE)-$(VERSION)
+	rm -rf $(PACKAGE)-$(VERSION)
+
+clean:
+	rm -f candled candlewin.exe test_agg
+
+distclean: clean
+	rm -f Makefile $(PACKAGE)-*.tar.gz
+
+.PHONY: all win check install uninstall deploy dist clean distclean

@@ -1,0 +1,19 @@
+Building and running candlewin
+==============================
+
+  ./configure            # finds cc, and x86_64-w64-mingw32-gcc for the Windows window; see ./configure --help
+  make                   # candled, and candlewin.exe if MinGW-w64 was found
+  make check             # the aggregation tests
+  make install           # candled under $(prefix)/sbin, candlewin.exe under $(prefix)/bin, the manual pages
+
+The server runs on the machine that has the candle files (it needs only a C compiler and POSIX):
+
+  make deploy HOST=name              # copies the sources there and builds candled
+  ~/candlewin/candled --dir /path/to/the/candles --port 8766
+
+To start it at boot, copy contrib/candled.service to ~/.config/systemd/user/, set the directory in it, and
+  systemctl --user daemon-reload && systemctl --user enable --now candled && loginctl enable-linger $USER
+
+The window is one file, candlewin.exe, with no installer and no dependency: copy it to the Windows machine and run it with
+--server HOST:PORT once (the setting is then kept in %APPDATA%\candlewin\candlewin.ini).  The server's port must be reachable from
+that machine.

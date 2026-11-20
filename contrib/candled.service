@@ -1,0 +1,12 @@
+# A systemd user unit for candled.  Copy it to ~/.config/systemd/user/, edit the directory, then:
+#     systemctl --user daemon-reload && systemctl --user enable --now candled
+#     loginctl enable-linger $USER        (so that it starts at boot without a login)
+[Unit]
+Description=candled: candles from the collector's files, as JSON
+
+[Service]
+ExecStart=%h/.local/sbin/candled --dir %h/path/to/candles --port 8766
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

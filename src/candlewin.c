@@ -1,0 +1,629 @@
+/*
+ * candlewin -- a small, frameless, always-on-top candle chart window for Windows, fed by candled.
+ *
+ *   candlewin [--server HOST:PORT] [--pair BTC] [--tf 5m] [--shot FILE.bmp]
+ *
+ * Win32 + GDI + WinHTTP, no other dependency.  See candlewin(1).
+ */
+#define _WIN32_WINNT 0x0601
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winhttp.h>
+#include <shellapi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+#ifndef PACKAGE_VERSION
+#define PACKAGE_VERSION "0.1.0"
+#endif
+
+#define WM_DATA     (WM_APP + 1)
+#define WM_TRAY     (WM_APP + 2)
+#define ID_HOTKEY   1
+#define ID_TRAY     1
+#define IDM_SHOW    100
+#define IDM_EXIT    101
+#define MAX_BARS    500
+#define MAX_PAIRS   256
+#define BASE        200
+
+static const char *TFS[] = { "1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w" };
+#define NTF 9
+
+typedef struct { double entry, size; } Position;
+
+static struct {
+    HWND   hwnd;
+    char   host[128]; int port;
+    char   pair[24]; int tf;
+    int    scale;                         /* percent: 100 = 200x200 */
+    char   pairs[MAX_PAIRS][24]; int npairs;
+    Position pos[MAX_PAIRS];              /* by index in pairs[] */
+    /* data (under cs) */
+    CRITICAL_SECTION cs;
+    int    n; double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS];
+    double price; double age_ms; int complete, have, failed;
+    char   data_pair[24]; int data_tf;
+    HANDLE wake; volatile int quit;
+    /* ui */
+    int    active, dragging, editing, tracking, hidden;   /* editing: 0 none, 'e' entry, 's' size */
+    char   edit[32];
+    HWND   prev;                         /* the window that had the keyboard before a click */
+    char   ini[MAX_PATH];
+    const char *shot; int shot_done; double shot_entry, shot_size; int shot_active;
+    UINT   taskbar_created;
+    HICON  icon;
+} A;
+
+/* ---------------------------------------------------------------- settings */
+
+static void ini_path(void)
+{
+    char dir[MAX_PATH - 16];
+    const char *ad = getenv("APPDATA");
+    snprintf(dir, sizeof dir, "%s\\candlewin", ad ? ad : ".");
+    CreateDirectoryA(dir, NULL);
+    snprintf(A.ini, sizeof A.ini, "%s\\candlewin.ini", dir);
+}
+
+static int pair_index(const char *p) { for (int i = 0; i < A.npairs; i++) if (!strcmp(A.pairs[i], p)) return i; return -1; }
+
+static void ini_get_pos(const char *pair, Position *p)
+{
+    char buf[64] = "";
+    GetPrivateProfileStringA("positions", pair, "", buf, sizeof buf, A.ini);
+    p->entry = p->size = 0;
+    if (buf[0]) sscanf(buf, "%lf,%lf", &p->entry, &p->size);
+}
+
+static void save_pos(const char *pair, const Position *p)
+{
+    char buf[64];
+    if (p->entry > 0 && p->size != 0) snprintf(buf, sizeof buf, "%.10g,%.10g", p->entry, p->size);
+    else buf[0] = 0;
+    WritePrivateProfileStringA("positions", pair, buf[0] ? buf : NULL, A.ini);
+}
+
+static Position *cur_pos(void)
+{
+    static Position none;
+    if (A.shot && A.shot_entry > 0) { none.entry = A.shot_entry; none.size = A.shot_size; return &none; }
+    int i = pair_index(A.pair);
+    if (i < 0) { none.entry = none.size = 0; ini_get_pos(A.pair, &none); return &none; }
+    return &A.pos[i];
+}
+
+static void save_all(void)
+{
+    char b[192];
+    WritePrivateProfileStringA("candlewin", "pair", A.pair, A.ini);
+    WritePrivateProfileStringA("candlewin", "tf", TFS[A.tf], A.ini);
+    snprintf(b, sizeof b, "%d", A.scale); WritePrivateProfileStringA("candlewin", "scale", b, A.ini);
+    snprintf(b, sizeof b, "%s:%d", A.host, A.port); WritePrivateProfileStringA("candlewin", "server", b, A.ini);
+    RECT r;
+    if (A.hwnd && !A.shot && GetWindowRect(A.hwnd, &r)) {
+        snprintf(b, sizeof b, "%ld", r.left); WritePrivateProfileStringA("candlewin", "x", b, A.ini);
+        snprintf(b, sizeof b, "%ld", r.top);  WritePrivateProfileStringA("candlewin", "y", b, A.ini);
+    }
+}
+
+static void parse_server(const char *s)
+{
+    const char *c = strrchr(s, ':');
+    if (c) { snprintf(A.host, sizeof A.host, "%.*s", (int)(c - s), s); A.port = atoi(c + 1); }
+    else { snprintf(A.host, sizeof A.host, "%s", s); A.port = 8766; }
+    if (A.port <= 0) A.port = 8766;
+}
+
+/* ---------------------------------------------------------------- the network (a worker thread) */
+
+static char *http_get(const char *path)
+{
+    wchar_t whost[160], wpath[256];
+    MultiByteToWideChar(CP_UTF8, 0, A.host, -1, whost, 160);
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 256);
+    char *out = NULL;
+    HINTERNET s = WinHttpOpen(L"candlewin/" L"0.1", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
+    if (!s) return NULL;
+    WinHttpSetTimeouts(s, 3000, 3000, 3000, 5000);
+    HINTERNET c = WinHttpConnect(s, whost, (INTERNET_PORT)A.port, 0);
+    HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", wpath, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0) : NULL;
+    if (r && WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(r, NULL)) {
+        DWORD code = 0, sz = sizeof code;
+        WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &code, &sz, NULL);
+        if (code == 200) {
+            size_t cap = 8192, len = 0; out = malloc(cap);
+            DWORD got;
+            while (out && WinHttpReadData(r, out + len, (DWORD)(cap - len - 1), &got) && got > 0) {
+                len += got;
+                if (cap - len < 4096) { cap *= 2; char *n = realloc(out, cap); if (!n) { free(out); out = NULL; break; } out = n; }
+            }
+            if (out) out[len] = 0;
+        }
+    }
+    if (r) WinHttpCloseHandle(r);
+    if (c) WinHttpCloseHandle(c);
+    WinHttpCloseHandle(s);
+    return out;
+}
+
+/* the numbers of  "key":[ ... ]  */
+static int get_arr(const char *body, const char *key, double *dst, int max)
+{
+    char pat[16]; snprintf(pat, sizeof pat, "\"%s\":[", key);
+    const char *p = strstr(body, pat);
+    if (!p) return 0;
+    p += strlen(pat);
+    int n = 0;
+    while (*p && *p != ']' && n < max) { char *e; dst[n++] = strtod(p, &e); if (e == p) break; p = e; if (*p == ',') p++; }
+    return n;
+}
+
+static double get_num(const char *body, const char *key)
+{
+    char pat[24]; snprintf(pat, sizeof pat, "\"%s\":", key);
+    const char *p = strstr(body, pat);
+    return p ? strtod(p + strlen(pat), NULL) : 0;
+}
+
+static void fetch_pairs(void)
+{
+    char *b = http_get("/pairs");
+    if (!b) return;
+    char list[MAX_PAIRS][24]; int n = 0;
+    for (const char *p = b; (p = strchr(p, '"')) != NULL && n < MAX_PAIRS; ) {
+        const char *e = strchr(p + 1, '"');
+        if (!e || e - p - 1 >= 24 || e == p + 1) break;
+        memcpy(list[n], p + 1, (size_t)(e - p - 1)); list[n][e - p - 1] = 0; n++; p = e + 1;
+    }
+    free(b);
+    if (n == 0) return;
+    EnterCriticalSection(&A.cs);
+    Position keep[MAX_PAIRS]; memcpy(keep, A.pos, sizeof keep);
+    char old[MAX_PAIRS][24]; int nold = A.npairs; memcpy(old, A.pairs, sizeof old);
+    memcpy(A.pairs, list, sizeof list); A.npairs = n;
+    for (int i = 0; i < n; i++) {
+        A.pos[i].entry = A.pos[i].size = 0;
+        int found = 0;
+        for (int j = 0; j < nold; j++) if (!strcmp(old[j], list[i])) { A.pos[i] = keep[j]; found = 1; break; }
+        if (!found) ini_get_pos(list[i], &A.pos[i]);
+    }
+    LeaveCriticalSection(&A.cs);
+}
+
+static DWORD WINAPI worker(LPVOID arg)
+{
+    (void)arg;
+    DWORD last_pairs = 0;
+    while (!A.quit) {
+        DWORD now = GetTickCount();
+        if (last_pairs == 0 || now - last_pairs > 60000) { fetch_pairs(); last_pairs = now; PostMessage(A.hwnd, WM_DATA, 0, 0); }
+        char pair[24]; int tf, bars;
+        EnterCriticalSection(&A.cs);
+        snprintf(pair, sizeof pair, "%s", A.pair); tf = A.tf;
+        bars = (BASE * A.scale / 100 - 8) / 4; if (bars > MAX_BARS) bars = MAX_BARS; if (bars < 10) bars = 10;
+        LeaveCriticalSection(&A.cs);
+        char path[160]; snprintf(path, sizeof path, "/candles?pair=%s&tf=%s&n=%d", pair, TFS[tf], bars);
+        char *b = http_get(path);
+        EnterCriticalSection(&A.cs);
+        if (b) {
+            static double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS];
+            int n = get_arr(b, "t", t, MAX_BARS);
+            if (n > 0 && get_arr(b, "o", o, MAX_BARS) == n && get_arr(b, "h", h, MAX_BARS) == n && get_arr(b, "l", l, MAX_BARS) == n && get_arr(b, "c", c, MAX_BARS) == n) {
+                memcpy(A.t, t, sizeof t); memcpy(A.o, o, sizeof o); memcpy(A.h, h, sizeof h); memcpy(A.l, l, sizeof l); memcpy(A.c, c, sizeof c);
+                A.n = n; A.price = get_num(b, "price"); A.age_ms = get_num(b, "age_ms"); A.complete = strstr(b, "\"complete\":true") != NULL;
+                A.have = 1; A.failed = 0; snprintf(A.data_pair, sizeof A.data_pair, "%s", pair); A.data_tf = tf;
+            } else { A.failed = 1; }
+            free(b);
+        } else A.failed = 1;
+        LeaveCriticalSection(&A.cs);
+        PostMessage(A.hwnd, WM_DATA, 0, 0);
+        WaitForSingleObject(A.wake, 1000);
+    }
+    return 0;
+}
+
+static void wake(void) { SetEvent(A.wake); }
+
+/* ---------------------------------------------------------------- drawing */
+
+static void fmt_price(double p, char *out, size_t cap)
+{
+    if (p >= 1000) snprintf(out, cap, "%.1f", p);
+    else if (p >= 100) snprintf(out, cap, "%.2f", p);
+    else if (p >= 1) snprintf(out, cap, "%.4f", p);
+    else snprintf(out, cap, "%.6g", p);
+}
+
+static void fmt_money(double v, char *out, size_t cap)
+{
+    double a = fabs(v);
+    snprintf(out, cap, "%s$%.*f", v < 0 ? "-" : "+", a >= 100 ? 0 : 2, a);
+}
+
+static HFONT font(int px, int bold) { return CreateFontA(-px, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, "Segoe UI"); }
+
+static void text(HDC dc, HFONT f, COLORREF col, int x, int y, const char *s, int align /* 0 left, 1 right, 2 center */)
+{
+    HGDIOBJ old = SelectObject(dc, f);
+    SetTextColor(dc, col); SetBkMode(dc, TRANSPARENT);
+    SIZE sz; GetTextExtentPoint32A(dc, s, (int)strlen(s), &sz);
+    int px = align == 1 ? x - sz.cx : align == 2 ? x - sz.cx / 2 : x;
+    TextOutA(dc, px, y, s, (int)strlen(s));
+    SelectObject(dc, old);
+}
+
+static void rect(HDC dc, int x0, int y0, int x1, int y1, COLORREF c)
+{
+    RECT r = { x0, y0, x1, y1 };
+    HBRUSH b = CreateSolidBrush(c); FillRect(dc, &r, b); DeleteObject(b);
+}
+
+#define COL_BG    RGB(16, 20, 26)
+#define COL_UP    RGB(38, 166, 91)
+#define COL_DOWN  RGB(224, 70, 70)
+#define COL_TXT   RGB(214, 220, 226)
+#define COL_DIM   RGB(120, 130, 140)
+#define COL_ENTRY RGB(240, 200, 60)
+
+static void paint(HDC dc, int S)
+{
+    double u = S / (double)BASE;                           /* scale factor */
+    #define U(v) ((int)((v) * u + 0.5))
+    rect(dc, 0, 0, S, S, COL_BG);
+    HFONT fb = font(U(13), 1), fn = font(U(11), 0), fs = font(U(9), 0), fp = font(U(15), 1);
+
+    EnterCriticalSection(&A.cs);
+    char pair[24]; snprintf(pair, sizeof pair, "%s", A.pair);
+    int tf = A.tf, n = A.have && !strcmp(A.data_pair, pair) ? A.n : 0;
+    int failed = A.failed, have = A.have, complete = A.complete;
+    double price = A.price, age = A.age_ms;
+    static double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS];
+    memcpy(o, A.o, sizeof o); memcpy(h, A.h, sizeof h); memcpy(l, A.l, sizeof l); memcpy(c, A.c, sizeof c); (void)t;
+    LeaveCriticalSection(&A.cs);
+    Position pos = *cur_pos();
+    char buf[96], buf2[160];
+
+    /* header */
+    snprintf(buf, sizeof buf, "%s  %s", pair, TFS[tf]);
+    text(dc, fb, COL_TXT, U(6), U(2), buf, 0);
+    if (n > 0) { fmt_price(price, buf, sizeof buf); text(dc, fp, COL_TXT, S - U(6), U(1), buf, 1); }
+    int top = U(22), bot = S - U(40);
+    if (!have || n == 0) {
+        text(dc, fn, failed ? COL_DOWN : COL_DIM, S / 2, S / 2 - U(8), failed ? "no data from the server" : "loading...", 2);
+    } else {
+        /* the chart */
+        double hi = h[0], lo = l[0];
+        for (int i = 1; i < n; i++) { if (h[i] > hi) hi = h[i]; if (l[i] < lo) lo = l[i]; }
+        double range = hi - lo; if (range <= 0) range = hi * 0.001 + 1e-9;
+        if (pos.entry > 0 && pos.size != 0 && pos.entry < hi + range && pos.entry > lo - range) {      /* the entry line is in the picture if near */
+            if (pos.entry > hi) hi = pos.entry;
+            if (pos.entry < lo) lo = pos.entry;
+            range = hi - lo;
+        }
+        double pad = range * 0.04; hi += pad; lo -= pad; range = hi - lo;
+        int cw = S - U(8), ch = bot - top;
+        #define Y(p) (top + (int)((hi - (p)) / range * ch + 0.5))
+        int step = n > 0 ? cw / n : 4; if (step < 2) step = 2;
+        int bw = step >= 4 ? step - 1 : step - 1 > 0 ? step - 1 : 1; if (bw > step - 1 && step > 1) bw = step - 1;
+        int x0 = U(4) + (cw - step * n);                         /* the newest bar at the right */
+        for (int i = 0; i < n; i++) {
+            COLORREF col = c[i] >= o[i] ? COL_UP : COL_DOWN;
+            int x = x0 + i * step, cx = x + bw / 2;
+            rect(dc, cx, Y(h[i]), cx + 1, Y(l[i]) + 1, col);
+            int yo = Y(o[i]), yc = Y(c[i]); if (yo > yc) { int tmp = yo; yo = yc; yc = tmp; }
+            rect(dc, x, yo, x + bw, yc + 1 > yo + 1 ? yc + 1 : yo + 1, col);
+        }
+        if (pos.entry > 0 && pos.size != 0) {
+            int y = Y(pos.entry);
+            HPEN pen = CreatePen(PS_DOT, 1, COL_ENTRY); HGDIOBJ old = SelectObject(dc, pen);
+            SetBkMode(dc, TRANSPARENT); MoveToEx(dc, U(4), y, NULL); LineTo(dc, S - U(4), y); SelectObject(dc, old); DeleteObject(pen);
+        }
+        double mx = c[n - 1]; int ypl = Y(mx);
+        { HPEN pen = CreatePen(PS_SOLID, 1, RGB(70, 80, 92)); HGDIOBJ old = SelectObject(dc, pen); MoveToEx(dc, U(4), ypl, NULL); LineTo(dc, S - U(4), ypl); SelectObject(dc, old); DeleteObject(pen); }
+        fmt_price(hi - pad, buf, sizeof buf); text(dc, fs, COL_DIM, U(5), top - U(1), buf, 0);
+        fmt_price(lo + pad, buf, sizeof buf); text(dc, fs, COL_DIM, U(5), bot - U(11), buf, 0);
+        if (age > 20000) { snprintf(buf, sizeof buf, "%d s old", (int)(age / 1000)); text(dc, fs, COL_ENTRY, S - U(5), top - U(1), buf, 1); }
+        else if (!complete) text(dc, fs, COL_DIM, S - U(5), top - U(1), "history loading", 1);
+    }
+
+    /* the footer: profit and loss */
+    int fy = S - U(38);
+    if (A.editing) {
+        snprintf(buf, sizeof buf, "%s> %s_", A.editing == 'e' ? "entry price" : "size (coins, - short)", A.edit);
+        text(dc, fn, COL_ENTRY, U(6), fy + U(4), buf, 0);
+        text(dc, fs, COL_DIM, U(6), fy + U(22), "Enter accepts, Esc cancels", 0);
+    } else if (pos.entry > 0 && pos.size != 0 && n > 0) {
+        double usd = (price - pos.entry) * pos.size;
+        double pct = (price / pos.entry - 1.0) * 100.0 * (pos.size > 0 ? 1 : -1);
+        COLORREF col = usd > 0 ? COL_UP : usd < 0 ? COL_DOWN : COL_TXT;
+        snprintf(buf, sizeof buf, "%+.2f%%", pct); fmt_money(usd, buf2, sizeof buf2);
+        text(dc, fp, col, U(6), fy, buf, 0);
+        text(dc, fp, col, S - U(6), fy, buf2, 1);
+        if (A.active) text(dc, fs, COL_DIM, U(6), fy + U(22), "up/down time  left/right coin  e s  del  x quit", 0);
+        else { fmt_price(pos.entry, buf, sizeof buf); snprintf(buf2, sizeof buf2, "%.6g @ %s", pos.size, buf); text(dc, fs, COL_DIM, U(6), fy + U(22), buf2, 0); }
+    } else {
+        text(dc, fn, COL_DIM, U(6), fy + U(4), "no position", 0);
+        text(dc, fs, COL_DIM, U(6), fy + U(22), A.active ? "e entry price   s size   x quit" : "click, then e / s to enter a position", 0);
+    }
+    if (A.active) {                                              /* the window has the keyboard */
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(70, 130, 200)); HGDIOBJ oldp = SelectObject(dc, pen), oldb = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        Rectangle(dc, 0, 0, S, S); SelectObject(dc, oldp); SelectObject(dc, oldb); DeleteObject(pen);
+    }
+    DeleteObject(fb); DeleteObject(fn); DeleteObject(fs); DeleteObject(fp);
+    #undef U
+    #undef Y
+}
+
+static int win_size(void) { return BASE * A.scale / 100; }
+
+static int save_bmp(const char *file, int S)
+{
+    HDC sc = GetDC(NULL), dc = CreateCompatibleDC(sc);
+    BITMAPINFO bi; memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = S; bi.bmiHeader.biHeight = -S; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
+    void *bits; HBITMAP bm = CreateDIBSection(sc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    HGDIOBJ old = SelectObject(dc, bm);
+    paint(dc, S);
+    BITMAPFILEHEADER fh = { 0x4D42, (DWORD)(sizeof fh + sizeof bi.bmiHeader + (size_t)S * S * 4), 0, 0, (DWORD)(sizeof fh + sizeof bi.bmiHeader) };
+    FILE *f = fopen(file, "wb");
+    int ok = f != NULL;
+    if (f) {
+        BITMAPINFOHEADER h = bi.bmiHeader; h.biHeight = S;                   /* bottom-up for the file */
+        fwrite(&fh, sizeof fh, 1, f); fwrite(&h, sizeof h, 1, f);
+        for (int y = S - 1; y >= 0; y--) fwrite((char *)bits + (size_t)y * S * 4, 4, (size_t)S, f);
+        fclose(f);
+    }
+    SelectObject(dc, old); DeleteObject(bm); DeleteDC(dc); ReleaseDC(NULL, sc);
+    return ok;
+}
+
+/* ---------------------------------------------------------------- the window */
+
+static void resize_window(void)
+{
+    int S = win_size();
+    SetWindowPos(A.hwnd, HWND_TOPMOST, 0, 0, S, S, SWP_NOMOVE | SWP_NOACTIVATE);
+    InvalidateRect(A.hwnd, NULL, FALSE);
+}
+
+static void set_passive(int passive)             /* WS_EX_NOACTIVATE: a click must not take the keyboard unless asked */
+{
+    LONG_PTR ex = GetWindowLongPtr(A.hwnd, GWL_EXSTYLE);
+    if (passive) ex |= WS_EX_NOACTIVATE; else ex &= ~(LONG_PTR)WS_EX_NOACTIVATE;
+    SetWindowLongPtr(A.hwnd, GWL_EXSTYLE, ex);
+}
+
+static void take_keyboard(void)
+{
+    if (A.active) return;
+    HWND fg = GetForegroundWindow();
+    A.prev = (fg && fg != A.hwnd) ? fg : NULL;
+    set_passive(0);
+    SetForegroundWindow(A.hwnd);
+    SetFocus(A.hwnd);
+    A.active = 1;
+    InvalidateRect(A.hwnd, NULL, FALSE);
+}
+
+static void give_up_keyboard(void)
+{
+    if (!A.active) return;
+    A.active = 0; A.editing = 0;
+    set_passive(1);
+    if (A.prev && IsWindow(A.prev) && IsWindowVisible(A.prev) && !IsIconic(A.prev)) SetForegroundWindow(A.prev);
+    A.prev = NULL;
+    InvalidateRect(A.hwnd, NULL, FALSE);
+}
+
+static void show_hide(int show)
+{
+    if (show) { A.hidden = 0; ShowWindow(A.hwnd, SW_SHOWNOACTIVATE); SetWindowPos(A.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); wake(); }
+    else { give_up_keyboard(); A.hidden = 1; ShowWindow(A.hwnd, SW_HIDE); }
+}
+
+static HICON make_icon(void)
+{
+    enum { N = 16 };
+    BITMAPINFO bi; memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = N; bi.bmiHeader.biHeight = -N; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
+    void *bits; HDC sc = GetDC(NULL);
+    HBITMAP color = CreateDIBSection(sc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    HBITMAP mask = CreateBitmap(N, N, 1, 1, NULL);
+    DWORD *px = bits;
+    for (int i = 0; i < N * N; i++) px[i] = 0xFF10141A;
+    struct { int x, y0, y1, by0, by1; DWORD c; } cs[] = { {3, 4, 12, 6, 11, 0xFFE04646}, {7, 2, 10, 3, 8, 0xFF26A65B}, {11, 1, 9, 2, 6, 0xFF26A65B} };
+    for (int k = 0; k < 3; k++) {
+        for (int y = cs[k].y0; y <= cs[k].y1; y++) px[y * N + cs[k].x] = cs[k].c;
+        for (int y = cs[k].by0; y <= cs[k].by1; y++) { px[y * N + cs[k].x - 1] = cs[k].c; px[y * N + cs[k].x + 1] = cs[k].c; px[y * N + cs[k].x] = cs[k].c; }
+    }
+    ICONINFO ii = { TRUE, 0, 0, mask, color };
+    HICON ic = CreateIconIndirect(&ii);
+    DeleteObject(color); DeleteObject(mask); ReleaseDC(NULL, sc);
+    return ic;
+}
+
+static void tray_add(void)
+{
+    NOTIFYICONDATAA nd; memset(&nd, 0, sizeof nd);
+    nd.cbSize = sizeof nd; nd.hWnd = A.hwnd; nd.uID = ID_TRAY; nd.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    nd.uCallbackMessage = WM_TRAY; nd.hIcon = A.icon;
+    snprintf(nd.szTip, sizeof nd.szTip, "candlewin: click to show or hide");
+    Shell_NotifyIconA(NIM_ADD, &nd);
+}
+static void tray_del(void) { NOTIFYICONDATAA nd; memset(&nd, 0, sizeof nd); nd.cbSize = sizeof nd; nd.hWnd = A.hwnd; nd.uID = ID_TRAY; Shell_NotifyIconA(NIM_DELETE, &nd); }
+
+static void change_pair(int dir)
+{
+    EnterCriticalSection(&A.cs);
+    int i = pair_index(A.pair), n = A.npairs;
+    if (n > 0) { i = i < 0 ? 0 : (i + dir + n) % n; snprintf(A.pair, sizeof A.pair, "%s", A.pairs[i]); }
+    A.have = 0; A.n = 0;
+    LeaveCriticalSection(&A.cs);
+    wake(); InvalidateRect(A.hwnd, NULL, FALSE);
+}
+
+static void change_tf(int dir)
+{
+    EnterCriticalSection(&A.cs);
+    A.tf = (A.tf + dir + NTF) % NTF; A.have = 0; A.n = 0;
+    LeaveCriticalSection(&A.cs);
+    wake(); InvalidateRect(A.hwnd, NULL, FALSE);
+}
+
+static void commit_edit(void)
+{
+    double v = strtod(A.edit, NULL);
+    Position *p = cur_pos();
+    if (A.editing == 'e') p->entry = v > 0 ? v : 0;
+    else if (A.editing == 's') p->size = v;
+    save_pos(A.pair, p);
+    A.editing = 0;
+    InvalidateRect(A.hwnd, NULL, FALSE);
+}
+
+static void quit_app(void) { save_all(); tray_del(); A.quit = 1; wake(); DestroyWindow(A.hwnd); }
+
+static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    switch (m) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        int S = win_size();
+        HDC mem = CreateCompatibleDC(dc); HBITMAP bm = CreateCompatibleBitmap(dc, S, S); HGDIOBJ old = SelectObject(mem, bm);
+        paint(mem, S);
+        BitBlt(dc, 0, 0, S, S, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old); DeleteObject(bm); DeleteDC(mem);
+        EndPaint(h, &ps);
+        return 0; }
+    case WM_ERASEBKGND: return 1;
+    case WM_DATA:
+        InvalidateRect(h, NULL, FALSE);
+        if (A.shot && !A.shot_done) {
+            EnterCriticalSection(&A.cs); int ready = A.have && A.complete; LeaveCriticalSection(&A.cs);
+            static int tries; if (ready || ++tries > 12) { A.shot_done = 1; save_bmp(A.shot, win_size()); quit_app(); }
+        }
+        return 0;
+    case WM_MOUSEACTIVATE: return A.active ? MA_ACTIVATE : MA_NOACTIVATE;
+    case WM_LBUTTONDOWN:
+        take_keyboard();
+        A.dragging = 1; ReleaseCapture(); SendMessage(h, WM_NCLBUTTONDOWN, HTCAPTION, 0); A.dragging = 0;       /* a click and drag moves the window */
+        { POINT pt; RECT r; GetCursorPos(&pt); GetWindowRect(h, &r); if (!PtInRect(&r, pt)) give_up_keyboard(); }
+        return 0;
+    case WM_RBUTTONUP: {
+        POINT pt; GetCursorPos(&pt);
+        HMENU mn = CreatePopupMenu();
+        AppendMenuA(mn, MF_STRING, IDM_SHOW, "Hide to the tray");
+        AppendMenuA(mn, MF_STRING, IDM_EXIT, "Exit");
+        SetForegroundWindow(h);
+        int cmd = TrackPopupMenu(mn, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, NULL);
+        DestroyMenu(mn);
+        if (cmd == IDM_SHOW) show_hide(0); else if (cmd == IDM_EXIT) quit_app();
+        return 0; }
+    case WM_MOUSEMOVE:
+        if (!A.tracking) { TRACKMOUSEEVENT te = { sizeof te, TME_LEAVE, h, 0 }; TrackMouseEvent(&te); A.tracking = 1; }
+        return 0;
+    case WM_MOUSELEAVE:
+        A.tracking = 0;
+        if (A.active && !A.dragging && !A.editing) give_up_keyboard();               /* the mouse out of the window: it gives the keyboard back at once */
+        return 0;
+    case WM_KILLFOCUS: if (A.active && !A.dragging) { A.active = 0; A.editing = 0; set_passive(1); InvalidateRect(h, NULL, FALSE); } return 0;
+    case WM_KEYDOWN:
+        if (A.editing) { if (w == VK_ESCAPE) { A.editing = 0; InvalidateRect(h, NULL, FALSE); } return 0; }
+        switch (w) {
+        case VK_UP: change_tf(1); break;
+        case VK_DOWN: change_tf(-1); break;
+        case VK_RIGHT: change_pair(1); break;
+        case VK_LEFT: change_pair(-1); break;
+        case VK_ESCAPE: give_up_keyboard(); break;
+        case VK_DELETE: { Position *p = cur_pos(); p->entry = p->size = 0; save_pos(A.pair, p); InvalidateRect(h, NULL, FALSE); break; }
+        }
+        return 0;
+    case WM_CHAR:
+        if (A.editing) {
+            size_t n = strlen(A.edit);
+            if (w == '\r') commit_edit();
+            else if (w == '\b') { if (n) A.edit[n - 1] = 0; }
+            else if ((w >= '0' && w <= '9') || w == '.' || w == '-' || w == ',') { if (n < sizeof A.edit - 1) { A.edit[n] = w == ',' ? '.' : (char)w; A.edit[n + 1] = 0; } }
+            InvalidateRect(h, NULL, FALSE);
+            return 0;
+        }
+        switch (w) {
+        case 'x': case 'X': quit_app(); break;
+        case 'e': case 'E': A.editing = 'e'; A.edit[0] = 0; InvalidateRect(h, NULL, FALSE); break;
+        case 's': case 'S': A.editing = 's'; A.edit[0] = 0; InvalidateRect(h, NULL, FALSE); break;
+        case 't': case 'T': show_hide(0); break;
+        case '+': case '=': if (A.scale < 400) { A.scale += 25; resize_window(); wake(); } break;
+        case '-': if (A.scale > 75) { A.scale -= 25; resize_window(); wake(); } break;
+        }
+        return 0;
+    case WM_HOTKEY: show_hide(A.hidden); return 0;
+    case WM_TRAY:
+        if (l == WM_LBUTTONUP) show_hide(A.hidden);
+        else if (l == WM_RBUTTONUP) {
+            POINT pt; GetCursorPos(&pt);
+            HMENU mn = CreatePopupMenu();
+            AppendMenuA(mn, MF_STRING, IDM_SHOW, A.hidden ? "Show" : "Hide to the tray");
+            AppendMenuA(mn, MF_STRING, IDM_EXIT, "Exit");
+            SetForegroundWindow(h);
+            int cmd = TrackPopupMenu(mn, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, NULL);
+            DestroyMenu(mn);
+            if (cmd == IDM_SHOW) show_hide(A.hidden); else if (cmd == IDM_EXIT) quit_app();
+        }
+        return 0;
+    case WM_EXITSIZEMOVE: save_all(); return 0;
+    case WM_DESTROY: PostQuitMessage(0); return 0;
+    default:
+        if (m == A.taskbar_created && A.taskbar_created) tray_add();
+    }
+    return DefWindowProc(h, m, w, l);
+}
+
+int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
+{
+    (void)hp; (void)cmd; (void)show;
+    InitializeCriticalSection(&A.cs);
+    ini_path();
+    char buf[128];
+    GetPrivateProfileStringA("candlewin", "server", "localhost:8766", buf, sizeof buf, A.ini); parse_server(buf);
+    GetPrivateProfileStringA("candlewin", "pair", "BTC", A.pair, sizeof A.pair, A.ini);
+    char tfs[8]; GetPrivateProfileStringA("candlewin", "tf", "5m", tfs, sizeof tfs, A.ini);
+    A.tf = 2; for (int i = 0; i < NTF; i++) if (!strcmp(tfs, TFS[i])) A.tf = i;
+    A.scale = GetPrivateProfileIntA("candlewin", "scale", 100, A.ini); if (A.scale < 75 || A.scale > 400) A.scale = 100;
+    int server_given = 0, argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    for (int i = 1; i < argc; i++) {
+        char a[256]; WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, a, sizeof a, NULL, NULL);
+        char nx[256] = ""; if (i + 1 < argc) WideCharToMultiByte(CP_UTF8, 0, argv[i + 1], -1, nx, sizeof nx, NULL, NULL);
+        if (!strcmp(a, "--server") && i + 1 < argc) { parse_server(nx); i++; server_given = 1; }
+        else if (!strcmp(a, "--pair") && i + 1 < argc) { snprintf(A.pair, sizeof A.pair, "%s", nx); i++; }
+        else if (!strcmp(a, "--tf") && i + 1 < argc) { for (int k = 0; k < NTF; k++) if (!strcmp(nx, TFS[k])) A.tf = k; i++; }
+        else if (!strcmp(a, "--shot") && i + 1 < argc) { static char shot[260]; snprintf(shot, sizeof shot, "%s", nx); A.shot = shot; i++; }
+        else if (!strcmp(a, "--shot-position") && i + 1 < argc) { sscanf(nx, "%lf,%lf", &A.shot_entry, &A.shot_size); i++; }
+        else if (!strcmp(a, "--shot-active")) A.shot_active = 1;
+        else if (!strcmp(a, "--version")) { MessageBoxA(NULL, "candlewin " PACKAGE_VERSION, "candlewin", MB_OK); return 0; }
+    }
+    if (server_given && !A.shot) save_all();                       /* the server given on the command line is kept */
+    A.wake = CreateEvent(NULL, FALSE, FALSE, NULL);
+    A.taskbar_created = RegisterWindowMessageA("TaskbarCreated");
+    A.icon = make_icon();
+    WNDCLASSA wc; memset(&wc, 0, sizeof wc);
+    wc.lpfnWndProc = wndproc; wc.hInstance = hi; wc.lpszClassName = "candlewin"; wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.hIcon = A.icon;
+    RegisterClassA(&wc);
+    RECT wa; SystemParametersInfo(SPI_GETWORKAREA, 0, &wa, 0);
+    A.active = A.shot_active;
+    int S = win_size();
+    int x = GetPrivateProfileIntA("candlewin", "x", wa.right - S - 20, A.ini), y = GetPrivateProfileIntA("candlewin", "y", wa.top + 20, A.ini);
+    if (x < wa.left - S + 40 || x > wa.right - 40 || y < wa.top - 10 || y > wa.bottom - 40) { x = wa.right - S - 20; y = wa.top + 20; }       /* off every screen: bring it back */
+    A.hwnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_APPWINDOW | WS_EX_NOACTIVATE, "candlewin", "candlewin", WS_POPUP, x, y, S, S, NULL, NULL, hi, NULL);
+    if (!A.hwnd) return 1;
+    tray_add();
+    RegisterHotKey(A.hwnd, ID_HOTKEY, MOD_CONTROL | MOD_ALT, 'C');
+    ShowWindow(A.hwnd, A.shot ? SW_HIDE : SW_SHOWNOACTIVATE);
+    CreateThread(NULL, 0, worker, NULL, 0, NULL);
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessage(&msg); }
+    UnregisterHotKey(A.hwnd, ID_HOTKEY);
+    return 0;
+}
