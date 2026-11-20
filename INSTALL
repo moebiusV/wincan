@@ -1,20 +1,20 @@
-Building and running candlewin
+Building and running wincan
 ==============================
 
   ./configure            # finds cc, and x86_64-w64-mingw32-gcc for the Windows window; see ./configure --help
-  make                   # candled, and candlewin.exe if MinGW-w64 was found
+  make                   # candled, and wincan.exe if MinGW-w64 was found
   make check             # the aggregation tests
-  make install           # candled under $(prefix)/sbin, candlewin.exe under $(prefix)/bin, the manual pages
+  make install           # candled under $(prefix)/sbin, wincan.exe under $(prefix)/bin, the manual pages
 
 The server runs on the machine that has the candle files (it needs only a C compiler and POSIX):
 
   make deploy HOST=name              # copies the sources there and builds candled
-  ~/candlewin/candled --dir /path/to/the/candles --port 8766
-  ~/candlewin/candled --dir /path/to/perp/candles --backfill /path/to/spot/candles    # perps first, spot for the time before they began
+  ~/wincan/candled --dir /path/to/the/candles --port 8766
+  ~/wincan/candled --dir /path/to/perp/candles --backfill /path/to/spot/candles    # perps first, spot for the time before they began
 
 To start it at boot, copy contrib/candled.service to ~/.config/systemd/user/, set the directory in it, and
   systemctl --user daemon-reload && systemctl --user enable --now candled && loginctl enable-linger $USER
 
-The window is one file, candlewin.exe, with no installer and no dependency: copy it to the Windows machine and run it with
---server HOST:PORT once (the setting is then kept in %APPDATA%\candlewin\candlewin.ini).  The server's port must be reachable from
+The window is one file, wincan.exe, with no installer and no dependency: copy it to the Windows machine and run it with
+--server HOST:PORT once (the setting is then kept in %APPDATA%\wincan\wincan.ini).  The server's port must be reachable from
 that machine.

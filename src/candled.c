@@ -26,12 +26,38 @@
 
 #define MAX_PAIRS 256
 static const char *dir = ".", *dir2 = NULL;      /* the primary files (perps), and the backfill (spot) for the time before the primary has data */
-typedef struct { char name[24]; Series a, b; int has_a, has_b; time_t checked; } Coin;
+typedef struct { char name[24]; Series a, b; int has_a, has_b; time_t checked; volatile int64_t last_req_ms, last_refresh_ms; } Coin;
 static Coin coins[MAX_PAIRS];
 static int ncoins;
 static pthread_mutex_t reg = PTHREAD_MUTEX_INITIALIZER;
 
 static int64_t now_ms(void) { struct timespec t; clock_gettime(CLOCK_REALTIME, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
+
+static void refresh_coin(Coin *c)
+{
+    if (c->has_a) series_refresh(&c->a);
+    if (c->has_b) series_refresh(&c->b);
+    c->last_refresh_ms = now_ms();
+}
+
+/*
+ * The upkeep of the rolling windows, apart from the requests: every loaded pair is brought up to date once a minute, and a pair that someone has asked
+ * for in the last five seconds every 100 ms, so an answer to a request is only a read of memory.  (Clients poll about once a second.)
+ */
+static void *refresher(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        struct timespec ts = { 0, 100 * 1000000L }; nanosleep(&ts, NULL);
+        int64_t t = now_ms();
+        for (int i = 0; i < ncoins; i++) {                      /* ncoins only grows, and a Coin is complete before it is counted */
+            Coin *c = &coins[i];
+            int watched = t - c->last_req_ms < 5000;
+            if (watched || t - c->last_refresh_ms >= 60000) refresh_coin(c);
+        }
+    }
+    return NULL;
+}
 
 static int valid_pair(const char *p)
 {
@@ -75,7 +101,8 @@ static Coin *coin_get(const char *name)
         c->has_a = open_series(&c->a, dir, name);
         c->has_b = dir2 ? open_series(&c->b, dir2, name) : 0;
         if (!c->has_a && !c->has_b) { pthread_mutex_unlock(&reg); return NULL; }
-        c->checked = time(NULL);
+        c->checked = time(NULL); c->last_req_ms = c->last_refresh_ms = now_ms();
+        __sync_synchronize();
         ncoins++;
     } else if ((!c->has_a || (dir2 && !c->has_b)) && time(NULL) - c->checked > 10) {
         c->checked = time(NULL);
@@ -196,8 +223,8 @@ static int handle(int fd, char *body, size_t bodycap, Out *out)
         if (n > MAX_BARS) n = MAX_BARS;
         Coin *c = coin_get(pair);
         if (!c) { respond(fd, 404, "Not Found", "{\"error\":\"no such pair\"}", 24); return 1; }
-        if (c->has_a) series_refresh(&c->a);
-        if (c->has_b) series_refresh(&c->b);
+        { int64_t t = now_ms(); if (t - c->last_req_ms >= 5000) refresh_coin(c);       /* nobody was watching: it is up to a minute old */
+          c->last_req_ms = t; }
         series_query2(c->has_a ? &c->a : NULL, c->has_b ? &c->b : NULL, tf, n, now_ms(), out);
         char sig[24]; signature(out, sig);
         if (seen[0] && !strcmp(seen, sig)) {                       /* nothing changed since the client's last answer: a few bytes only */
@@ -214,6 +241,19 @@ static int handle(int fd, char *body, size_t bodycap, Out *out)
         arr(body, bodycap, &o, "l", out->l, NULL, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");
         arr(body, bodycap, &o, "c", out->c, NULL, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");
         arr(body, bodycap, &o, "v", out->v, NULL, out->n); o += snprintf(body + o, bodycap - (size_t)o, "}");
+        respond(fd, 200, "OK", body, o);
+        return 1;
+    }
+    if (!strcmp(path, "/range")) {
+        char pair[40] = "", ss[24] = "0";
+        qparam(q, "pair", pair, sizeof pair); qparam(q, "since", ss, sizeof ss);
+        if (!valid_pair(pair)) { respond(fd, 400, "Bad Request", "{\"error\":\"pair wrong\"}", 23); return 1; }
+        Coin *c = coin_get(pair);
+        if (!c) { respond(fd, 404, "Not Found", "{\"error\":\"no such pair\"}", 24); return 1; }
+        { int64_t t = now_ms(); if (t - c->last_req_ms >= 5000) refresh_coin(c); c->last_req_ms = t; }
+        Range r; series_range2(c->has_a ? &c->a : NULL, c->has_b ? &c->b : NULL, atoll(ss), &r);
+        int o = snprintf(body, bodycap, "{\"pair\":\"%s\",\"since\":%lld,\"n\":%d,\"high\":%.8g,\"high_t\":%lld,\"low\":%.8g,\"low_t\":%lld,\"price\":%.8g}",
+                         pair, (long long)atoll(ss), r.n, r.high, (long long)r.high_t, r.low, (long long)r.low_t, (double)r.price);
         respond(fd, 200, "OK", body, o);
         return 1;
     }
@@ -255,6 +295,7 @@ int main(int argc, char **argv)
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
     if (inet_pton(AF_INET, bind_addr, &a.sin_addr) != 1) { fprintf(stderr, "candled: bad address %s\n", bind_addr); return 2; }
     if (bind(ls, (struct sockaddr *)&a, sizeof a) < 0 || listen(ls, 16) < 0) { perror("candled: bind"); return 1; }
+    { pthread_t rt; pthread_attr_t ra; pthread_attr_init(&ra); pthread_attr_setdetachstate(&ra, PTHREAD_CREATE_DETACHED); pthread_create(&rt, &ra, refresher, NULL); pthread_attr_destroy(&ra); }
     fprintf(stderr, "candled: serving %s%s%s on %s:%d\n", dir, dir2 ? " backfilled from " : "", dir2 ? dir2 : "", bind_addr, port);
     for (;;) {
         int fd = accept(ls, NULL, NULL);

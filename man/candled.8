@@ -1,4 +1,4 @@
-.TH CANDLED 8 "November 2026" "candlewin" "System Administration"
+.TH CANDLED 8 "November 2026" "wincan" "System Administration"
 .SH NAME
 candled \- serve candles from a collector's binary files, as JSON
 .SH SYNOPSIS
@@ -12,7 +12,7 @@ reads the files
 .IR DIR/NAME.bin
 that a candle collector appends to continuously, aggregates them with rolling windows, and answers
 read\-only HTTP requests from
-.BR candlewin (1)
+.BR wincan (1)
 and anything else that wants candles.  It writes nothing and keeps no secrets; it listens on all
 addresses unless
 .B \-\-bind
@@ -54,6 +54,7 @@ the TCP port (default 8766).
 .TP
 .BI \-\-bind " ADDRESS"
 an IPv4 address to listen on (default 0.0.0.0).
+A thread keeps the windows up to date apart from the requests: every loaded pair once a minute, and a pair that has been asked for in the last five seconds every 100 milliseconds, so that a request is answered from memory.  Clients should poll about once a second.
 .SH PROTOCOL
 Only GET.  Answers are JSON; errors are an object with an
 .B error
@@ -89,5 +90,5 @@ bars, to be merged by their start times into what the client already has.
 Without markers (the start of an old file, a stalled collector) the file's modification time stands for the end of the data.
 Bars older than the last interruption of the collector have their order and shape right but their clock times drift by the length of the gap.
 .SH SEE ALSO
-.BR candlewin (1),
-.BR candlewin (5)
+.BR wincan (1),
+.BR wincan (5)

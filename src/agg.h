@@ -11,8 +11,8 @@
  * A collector that was killed in mid-write leaves a partial frame, after which the frames sit at another offset
  * (a few bytes later); the parser finds them again by the '{' ... '}' pattern of three frames in a row.
  */
-#ifndef CANDLEWIN_AGG_H
-#define CANDLEWIN_AGG_H
+#ifndef WINCAN_AGG_H
+#define WINCAN_AGG_H
 
 #include <stdint.h>
 #include <pthread.h>
@@ -56,6 +56,9 @@ int  series_history(Series *s, int64_t nrecs);                   /* fold nrecs o
 int  series_refresh(Series *s);                                  /* fold what the collector has appended since; 0 on success */
 void series_query(Series *s, int tf_minutes, int n, int64_t now_ms, Out *out);
 /* the same from two series: a minute is taken from the primary where it has one, else from the backfill (either may be NULL) */
+/* the highest high and lowest low of the minutes from since_sec to now, and the minute (seconds) of each; n is the number of minutes with data */
+typedef struct { double high, low; int64_t high_t, low_t; int n; float price; } Range;
+void series_range2(Series *primary, Series *backfill, int64_t since_sec, Range *r);
 void series_query2(Series *primary, Series *backfill, int tf_minutes, int n, int64_t now_ms, Out *out);
 int  tf_minutes(const char *name);                               /* "5m" -> 5; 0 when not one of the nine */
 

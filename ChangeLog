@@ -3,3 +3,4 @@
 2026-11-20  The window is 300x175; q quits as well as x.
 2026-11-20  Indicators with toggle dots; candled --backfill; the window starts at the top left and is kept on screen.
 2026-11-20  Incremental polling with a signature (unchanged answers); the current candle brighter and thicker with space to its right.
+2026-11-20  Renamed to wincan; position editor, close and trade log; /range; background refresh in candled; forward-fill and garbage handling in the aggregation; one copy only.

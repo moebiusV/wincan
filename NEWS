@@ -1,6 +1,6 @@
-candlewin 0.1.0 (2026-11-20)
+wincan 0.1.0 (2026-11-20)
   First version: candled (JSON candles from the collector's framed .bin files, rolling aggregation, nine timeframes) and
-  candlewin.exe (frameless 300x175 always-on-top window, entry price and size with profit and loss in percent and dollars,
+  wincan.exe (frameless 300x175 always-on-top window, entry price and size with profit and loss in percent and dollars,
   tray icon, hotkey, keyboard taken on click and given back when the mouse leaves).
   Connections are kept open (HTTP keep-alive, a thread for each); the window keeps one connection, finds the server's address once, and
   keeps what it fetched for each coin and timeframe, so changing back is instant.  /pairs lists only files written in the last three days.
@@ -10,3 +10,7 @@ candlewin 0.1.0 (2026-11-20)
   Polling: once the history is whole, the window asks once a second for only the last two bars with the signature it holds; the server answers
   "unchanged" in a few bytes when nothing moved, and a settled bar is replaced by its final values as the next one starts.  The current candle is drawn
   brighter and thicker, with black space to its right.
+  The project and the Windows program are now called wincan (wincan.exe); the server is still candled.  e opens a position editor (price and amount, Tab between them; Enter or the mouse
+  leaving the window ends it); x closes the trade at the mark and logs it with the best and worst excursions; q quits; one copy only; the chart stays when the connection drops.
+  candled keeps every loaded pair's windows up to date in the background (a minute for all, 100 ms for the one being watched) and has /range for the highest and lowest since a time.
+  Candles: forward-filled 100 ms candles no longer make a minute's open, high or low; garbage frames are ignored.

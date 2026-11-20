@@ -1,10 +1,10 @@
-.TH CANDLEWIN 5 "November 2026" "candlewin" "File Formats"
+.TH WINCAN 5 "November 2026" "wincan" "File Formats"
 .SH NAME
-candlewin.ini \- settings of candlewin
+wincan.ini \- settings of wincan
 .SH DESCRIPTION
-.B %APPDATA%\\candlewin\\candlewin.ini
+.B %APPDATA%\\wincan\\wincan.ini
 is a Windows INI file that the program writes when the window is moved and at exit.  It can be edited while the program is not running.
-.SS [candlewin]
+.SS [wincan]
 .TP
 .B server
 .I HOST:PORT
@@ -30,5 +30,5 @@ One line for each coin that has a position:
 with the entry price and the size in coins (negative for a short), for example
 .BR BTC=61000,0.5 .
 .SH SEE ALSO
-.BR candlewin (1),
+.BR wincan (1),
 .BR candled (8)

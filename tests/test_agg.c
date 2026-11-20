@@ -42,7 +42,7 @@ static void set_mtime(const char *p, long long ms)
 
 static void check_file(const char *label, int markers)
 {
-    const char *p = "/tmp/candlewin-test.bin";
+    const char *p = "/tmp/wincan-test.bin";
     unlink(p);
     long N = 3 * 3600 * 10 + 4567;
     long long t0 = 1700000000000LL + 37000;
@@ -109,7 +109,7 @@ static void check_file(const char *label, int markers)
 /* a collector killed in mid-write: a partial frame in the middle of the file, after which the frames sit 11 bytes later */
 static void check_break(void)
 {
-    const char *p = "/tmp/candlewin-test2.bin";
+    const char *p = "/tmp/wincan-test2.bin";
     unlink(p);
     long N = 40000; long long t0 = 1700000040000LL;
     FILE *f = fopen(p, "wb");
@@ -142,7 +142,7 @@ static void check_break(void)
 /* the perp file starts two hours into the spot file: before that the chart is spot, after it perp */
 static void check_backfill(void)
 {
-    const char *ps = "/tmp/candlewin-test-spot.bin", *pp = "/tmp/candlewin-test-perp.bin";
+    const char *ps = "/tmp/wincan-test-spot.bin", *pp = "/tmp/wincan-test-perp.bin";
     unlink(ps); unlink(pp);
     long long t0 = 1700000040000LL;                              /* a whole minute */
     long NS = 3 * 36000;                                         /* three hours of spot */
@@ -175,8 +175,80 @@ static void check_backfill(void)
     series_close(&sp); series_close(&pe); unlink(ps); unlink(pp);
 }
 
+/* frames that look right (brace, 28 bytes, brace) but hold garbage must not spoil the bar */
+static void check_garbage(void)
+{
+    const char *p = "/tmp/wincan-test3.bin";
+    unlink(p);
+    long N = 12000; long long t0 = 1700000040000LL;
+    FILE *f = fopen(p, "wb");
+    for (long i = 0; i < N; i++) {
+        if (i % 600 == 0) marker(f, t0 + i * 100LL);
+        Rec r = mk(i);
+        if (i == 700) r.H = 3.4e38f;                      /* a garbage high */
+        if (i == 701) r.L = 9.18e-41f;                    /* a garbage (denormal) low */
+        if (i == 702) r.V = 1.1e22f;                      /* a garbage volume */
+        frame(f, &r);
+    }
+    fclose(f);
+    set_mtime(p, t0 + N * 100LL);
+    Series s; series_open(&s, p, 20000);
+    series_tail(&s, 20000); while (series_history(&s, 400000)) ;
+    Out o; series_query(&s, 1, 20, t0 + N * 100LL, &o);
+    int ok2 = o.n > 0;
+    for (int i = 0; i < o.n; i++) if (!(o.h[i] < 200 && o.l[i] > 50 && o.v[i] < 1e6)) ok2 = 0;
+    CHECK("garbage: highs, lows and volumes stay believable", ok2);
+    series_close(&s); unlink(p);
+}
+
+static void check_range(void)
+{
+    const char *p = "/tmp/wincan-test4.bin";
+    unlink(p);
+    long N = 36000; long long t0 = 1700000040000LL;
+    FILE *f = fopen(p, "wb");
+    for (long i = 0; i < N; i++) { if (i % 600 == 0) marker(f, t0 + i * 100LL); Rec r = mk(i); frame(f, &r); }
+    fclose(f);
+    set_mtime(p, t0 + N * 100LL);
+    Series s; series_open(&s, p, 20000); series_tail(&s, 50000); while (series_history(&s, 400000)) ;
+    long long since = t0 / 1000 + 20 * 60;                       /* from minute 20 on */
+    Range r; series_range2(&s, NULL, since, &r);
+    double hi = -1, lo = 1e9; for (long i = 20 * 600; i < N; i++) { Rec x = mk(i); if (x.H > hi) hi = x.H; if (x.L < lo) lo = x.L; }
+    CHECK("range: 40 minutes", r.n == 40);
+    CHECK("range: high", fabs(r.high - hi) < 1e-3);
+    CHECK("range: low", fabs(r.low - lo) < 1e-3);
+    CHECK("range: the times are inside it", r.high_t >= since && r.low_t >= since);
+    series_close(&s); unlink(p);
+}
+
+/* a minute that begins with forward-filled candles opens at its first trade, not at the previous close */
+static void check_fill(void)
+{
+    const char *p = "/tmp/wincan-test5.bin";
+    unlink(p);
+    long long t0 = 1700000040000LL;
+    FILE *f = fopen(p, "wb");
+    marker(f, t0);
+    for (int i = 0; i < 600; i++) { Rec r; r.O = r.H = r.L = r.C = 100; r.V = 1; r.J = 0; r.N = 1; if (i == 0) { r.H = 101; r.L = 99; } frame(f, &r); }      /* minute 0: real */
+    for (int i = 0; i < 50; i++) { Rec r; r.O = r.H = r.L = r.C = 100; r.V = 0; r.J = 0; r.N = 0; frame(f, &r); }                                      /* minute 1 begins quiet */
+    for (int i = 50; i < 600; i++) { Rec r; r.O = 105; r.H = 106; r.L = 104; r.C = 105.5f; r.V = 2; r.J = 0; r.N = 3; frame(f, &r); }
+    fclose(f);
+    set_mtime(p, t0 + 1200 * 100LL);
+    Series s; series_open(&s, p, 20000); series_tail(&s, 5000); while (series_history(&s, 400000)) ;
+    Out o; series_query(&s, 1, 5, t0 + 1200 * 100LL, &o);
+    CHECK("fill: two bars", o.n == 2);
+    CHECK("fill: the second minute opens at its first trade", fabs(o.o[1] - 105) < 1e-4);
+    CHECK("fill: its low is not the previous close", fabs(o.l[1] - 104) < 1e-4);
+    CHECK("fill: its high", fabs(o.h[1] - 106) < 1e-4);
+    CHECK("fill: its close", fabs(o.c[1] - 105.5) < 1e-4);
+    series_close(&s); unlink(p);
+}
+
 int main(void)
 {
+    check_fill();
+    check_range();
+    check_garbage();
     check_backfill();
     check_break();
     check_file("with markers", 1);

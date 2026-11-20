@@ -1,11 +1,11 @@
-.TH CANDLEWIN 1 "November 2026" "candlewin" "User Commands"
+.TH WINCAN 1 "November 2026" "wincan" "User Commands"
 .SH NAME
-candlewin \- a small frameless candle chart window for Windows
+wincan \- a small frameless candle chart window for Windows
 .SH SYNOPSIS
-.B candlewin.exe
+.B wincan.exe
 [\fB\-\-server\fR \fIHOST:PORT\fR] [\fB\-\-pair\fR \fINAME\fR] [\fB\-\-tf\fR \fIFRAME\fR]
 .SH DESCRIPTION
-.B candlewin
+.B wincan
 shows the candles and last price of one coin, from a
 .BR candled (8)
 server, in a 300 by 175 pixel window with no frame, border or title bar that stays on top of other windows.  It
@@ -23,10 +23,7 @@ the timeframe: 1m 3m 5m 15m 30m 1h 4h 1d 1w.
 the coin, in the order the server lists them.
 .TP
 .B e
-type the entry price; Enter accepts, Esc cancels.
-.TP
-.B s
-type the size in coins (negative for a short).
+open the position editor: two boxes, the entry price and the amount in coins (negative for a short).  Tab goes between the boxes, Enter, or moving the mouse out of the window, says the position has been entered (done); Esc cancels.  A box left empty keeps what it held; the first key typed in a box replaces its contents.
 .TP
 .B Delete
 clear the position of this coin.
@@ -37,8 +34,11 @@ hide the window in the tray.
 .B + , \-
 make the window larger or smaller (75% to 400%).
 .TP
-.B x, q
-exit.
+.B q
+quit the program.
+.TP
+.B x
+close the trade of the coin on show at the current price (the mark) and log it, see TRADE LOG.
 .TP
 .B Esc
 give the keyboard back.
@@ -48,6 +48,14 @@ Three small dots at the bottom right switch the Bollinger bands (20 periods, 2 s
 A tray icon shows or hides the window with a click; its menu has Exit.  Ctrl+Alt+C does the same from anywhere.  While shown the
 window is in Alt\-Tab and has a taskbar button, which minimizes it.  A window hidden in the tray is not in Alt\-Tab: use the icon
 or Ctrl+Alt+C.
+.SH TRADE LOG
+When a trade is closed with
+.BR x ,
+one line is appended to
+.B %APPDATA%\\wincan\\trades.csv
+(a header line is written first): the time closed, the coin, long or short, the entry and the size, the time opened, the exit price, the profit or loss in dollars and per cent, the highest and lowest price since entry with the time of each, the best and the worst the trade went through (the maximum favorable and maximum adverse excursion, in per cent and in dollars) and the duration in seconds.  The highest and lowest prices are asked of the server, so they are right even if the window was not running meanwhile.  While a position is open the window shows the best and worst so far.
+.SH ONE COPY
+Only one copy runs: starting a second finds the first, shows its window (it may be hidden in the tray) and exits.
 .SH OPTIONS
 .TP
 .BI \-\-server " HOST:PORT"
@@ -60,9 +68,9 @@ start with this coin and timeframe.
 draw once and write the picture to a file, then exit (for testing; with \fB\-\-shot\-position\fR \fIENTRY,SIZE\fR and \fB\-\-shot\-active\fR).
 .SH FILES
 .TP
-.B %APPDATA%\\candlewin\\candlewin.ini
+.B %APPDATA%\\wincan\\wincan.ini
 settings; see
-.BR candlewin (5).
+.BR wincan (5).
 .SH SEE ALSO
 .BR candled (8),
-.BR candlewin (5)
+.BR wincan (5)

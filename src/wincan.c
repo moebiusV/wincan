@@ -1,9 +1,9 @@
 /*
- * candlewin -- a small, frameless, always-on-top candle chart window for Windows, fed by candled.
+ * wincan -- a small, frameless, always-on-top candle chart window for Windows, fed by candled.
  *
- *   candlewin [--server HOST:PORT] [--pair BTC] [--tf 5m] [--shot FILE.bmp]
+ *   wincan [--server HOST:PORT] [--pair BTC] [--tf 5m] [--shot FILE.bmp]
  *
- * Win32 + GDI + WinHTTP, no other dependency.  See candlewin(1).
+ * Win32 + GDI + WinHTTP, no other dependency.  See wincan(1).
  */
 #define _WIN32_WINNT 0x0601
 #define WIN32_LEAN_AND_MEAN
@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 #ifndef PACKAGE_VERSION
 #define PACKAGE_VERSION "0.1.0"
@@ -23,6 +24,7 @@
 
 #define WM_DATA     (WM_APP + 1)
 #define WM_TRAY     (WM_APP + 2)
+#define WM_SHOWIT   (WM_APP + 3)
 #define ID_HOTKEY   1
 #define ID_TRAY     1
 #define IDM_SHOW    100
@@ -35,7 +37,11 @@
 static const char *TFS[] = { "1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w" };
 #define NTF 9
 
-typedef struct { double entry, size; } Position;
+typedef struct {
+    double entry, size;                  /* size in coins, negative for a short */
+    long long opened;                    /* when the position was entered (Unix seconds) */
+    double hi, lo; long long hi_t, lo_t; int have_range;      /* the highest and lowest price since, and when (from the server) */
+} Position;
 
 static struct {
     HWND   hwnd;
@@ -54,11 +60,14 @@ static struct {
     HANDLE wake; volatile int quit;
     /* ui */
     int    ind[3], hover;                 /* indicators on/off: Bollinger bands, 9 MA, 200 MA; the dot the mouse is over (-1: none) */
-    int    active, dragging, editing, tracking, hidden;   /* editing: 0 none, 'e' entry, 's' size */
-    char   edit[32];
+    int    active, dragging, editing, tracking, hidden;   /* editing: the position editor is open */
+    int    field, fresh[2];                /* the box being typed in (0 entry price, 1 amount); a box's first key replaces what it held */
+    char   edit[2][32];
     HWND   prev;                         /* the window that had the keyboard before a click */
-    char   ini[MAX_PATH];
-    const char *shot; int shot_done; double shot_entry, shot_size; int shot_active;
+    char   ini[MAX_PATH], logpath[MAX_PATH];
+    volatile int close_req;              /* x was pressed: the worker closes the trade at the mark */
+    struct { int valid; DWORD when; double pct, usd, mfe, mae; char pair[24]; } last;     /* the trade closed last, shown for a while */
+    const char *shot; int shot_done; double shot_entry, shot_size; int shot_active, shot_editor, test_close;
     UINT   taskbar_created;
     HICON  icon;
 } A;
@@ -69,9 +78,11 @@ static void ini_path(void)
 {
     char dir[MAX_PATH - 16];
     const char *ad = getenv("APPDATA");
-    snprintf(dir, sizeof dir, "%s\\candlewin", ad ? ad : ".");
+    const char *od = getenv("WINCAN_DIR");                    /* for tests: another directory for the settings and the log */
+    if (od) snprintf(dir, sizeof dir, "%s", od); else snprintf(dir, sizeof dir, "%s\\wincan", ad ? ad : ".");
     CreateDirectoryA(dir, NULL);
-    snprintf(A.ini, sizeof A.ini, "%s\\candlewin.ini", dir);
+    snprintf(A.ini, sizeof A.ini, "%s\\wincan.ini", dir);
+    snprintf(A.logpath, sizeof A.logpath, "%s\\trades.csv", dir);
 }
 
 static int pair_index(const char *p) { for (int i = 0; i < A.npairs; i++) if (!strcmp(A.pairs[i], p)) return i; return -1; }
@@ -80,14 +91,14 @@ static void ini_get_pos(const char *pair, Position *p)
 {
     char buf[64] = "";
     GetPrivateProfileStringA("positions", pair, "", buf, sizeof buf, A.ini);
-    p->entry = p->size = 0;
-    if (buf[0]) sscanf(buf, "%lf,%lf", &p->entry, &p->size);
+    memset(p, 0, sizeof *p);
+    if (buf[0]) sscanf(buf, "%lf,%lf,%lld", &p->entry, &p->size, &p->opened);
 }
 
 static void save_pos(const char *pair, const Position *p)
 {
     char buf[64];
-    if (p->entry > 0 && p->size != 0) snprintf(buf, sizeof buf, "%.10g,%.10g", p->entry, p->size);
+    if (p->entry > 0 && p->size != 0) snprintf(buf, sizeof buf, "%.10g,%.10g,%lld", p->entry, p->size, p->opened);
     else buf[0] = 0;
     WritePrivateProfileStringA("positions", pair, buf[0] ? buf : NULL, A.ini);
 }
@@ -95,9 +106,9 @@ static void save_pos(const char *pair, const Position *p)
 static Position *cur_pos(void)
 {
     static Position none;
-    if (A.shot && A.shot_entry > 0) { none.entry = A.shot_entry; none.size = A.shot_size; return &none; }
+    if (A.shot && A.shot_entry > 0) { memset(&none, 0, sizeof none); none.entry = A.shot_entry; none.size = A.shot_size; none.opened = 1; return &none; }
     int i = pair_index(A.pair);
-    if (i < 0) { none.entry = none.size = 0; ini_get_pos(A.pair, &none); return &none; }
+    if (i < 0) { ini_get_pos(A.pair, &none); return &none; }
     return &A.pos[i];
 }
 
@@ -105,17 +116,17 @@ static void save_all(void)
 {
     if (A.shot) return;                  /* a test picture changes no settings */
     char b[192];
-    WritePrivateProfileStringA("candlewin", "pair", A.pair, A.ini);
-    WritePrivateProfileStringA("candlewin", "tf", TFS[A.tf], A.ini);
-    snprintf(b, sizeof b, "%d", A.scale); WritePrivateProfileStringA("candlewin", "scale", b, A.ini);
-    WritePrivateProfileStringA("candlewin", "bollinger", A.ind[0] ? "1" : "0", A.ini);
-    WritePrivateProfileStringA("candlewin", "ma9", A.ind[1] ? "1" : "0", A.ini);
-    WritePrivateProfileStringA("candlewin", "ma200", A.ind[2] ? "1" : "0", A.ini);
-    snprintf(b, sizeof b, "%s:%d", A.host, A.port); WritePrivateProfileStringA("candlewin", "server", b, A.ini);
+    WritePrivateProfileStringA("wincan", "pair", A.pair, A.ini);
+    WritePrivateProfileStringA("wincan", "tf", TFS[A.tf], A.ini);
+    snprintf(b, sizeof b, "%d", A.scale); WritePrivateProfileStringA("wincan", "scale", b, A.ini);
+    WritePrivateProfileStringA("wincan", "bollinger", A.ind[0] ? "1" : "0", A.ini);
+    WritePrivateProfileStringA("wincan", "ma9", A.ind[1] ? "1" : "0", A.ini);
+    WritePrivateProfileStringA("wincan", "ma200", A.ind[2] ? "1" : "0", A.ini);
+    snprintf(b, sizeof b, "%s:%d", A.host, A.port); WritePrivateProfileStringA("wincan", "server", b, A.ini);
     RECT r;
     if (A.hwnd && !A.shot && GetWindowRect(A.hwnd, &r)) {
-        snprintf(b, sizeof b, "%ld", r.left); WritePrivateProfileStringA("candlewin", "x", b, A.ini);
-        snprintf(b, sizeof b, "%ld", r.top);  WritePrivateProfileStringA("candlewin", "y", b, A.ini);
+        snprintf(b, sizeof b, "%ld", r.left); WritePrivateProfileStringA("wincan", "x", b, A.ini);
+        snprintf(b, sizeof b, "%ld", r.top);  WritePrivateProfileStringA("wincan", "y", b, A.ini);
     }
 }
 
@@ -157,7 +168,7 @@ static char *http_get(const char *path)
     if (!g_conn) {                                  /* only at the start, or after a failure */
         wchar_t whost[160];
         MultiByteToWideChar(CP_UTF8, 0, A.ip[0] ? A.ip : A.host, -1, whost, 160);
-        g_sess = WinHttpOpen(L"candlewin/0.1", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
+        g_sess = WinHttpOpen(L"wincan/0.1", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
         if (!g_sess) return NULL;
         WinHttpSetTimeouts(g_sess, 3000, 3000, 3000, 5000);
         g_conn = WinHttpConnect(g_sess, whost, (INTERNET_PORT)A.port, 0);
@@ -239,6 +250,67 @@ static void show_cached(void);
 
 static int find_slot(const char *pair, int tf) { for (int i = 0; i < A.ncache; i++) if (A.cache[i].tf == tf && !strcmp(A.cache[i].pair, pair)) return i; return -1; }
 
+static void iso(long long t, char *out, size_t cap)
+{
+    time_t tt = (time_t)t; struct tm *g = gmtime(&tt);
+    if (!g || t <= 0) { if (cap) out[0] = 0; return; }
+    strftime(out, cap, "%Y-%m-%dT%H:%M:%SZ", g);
+}
+
+/* the best and worst of the trade as a percentage from the entry and in dollars: the highest and lowest price since entry, the entry itself and the exit counting */
+static void excursions(const Position *p, double hi, double lo, double *mfe, double *mae, double *mfe_usd, double *mae_usd)
+{
+    if (hi < p->entry) hi = p->entry;
+    if (lo > p->entry) lo = p->entry;
+    double best = p->size > 0 ? hi : lo, worst = p->size > 0 ? lo : hi, sgn = p->size > 0 ? 1 : -1;
+    *mfe = (best / p->entry - 1.0) * 100.0 * sgn;  *mae = (worst / p->entry - 1.0) * 100.0 * sgn;
+    *mfe_usd = (best - p->entry) * p->size;        *mae_usd = (worst - p->entry) * p->size;
+}
+
+static void parse_range(const char *b, Position *p)
+{
+    double hi = get_num(b, "high"), lo = get_num(b, "low"); int n = (int)get_num(b, "n");
+    if (n > 0 && hi > 0 && lo > 0) { p->hi = hi; p->lo = lo; p->hi_t = (long long)get_num(b, "high_t"); p->lo_t = (long long)get_num(b, "low_t"); p->have_range = 1; }
+}
+
+/* x: close the trade of the pair on show at the mark, and log it: the exit, the profit or loss, and the best and worst the trade went through */
+static void do_close(void)
+{
+    char pair[24]; Position p; double price = 0;
+    EnterCriticalSection(&A.cs);
+    snprintf(pair, sizeof pair, "%s", A.pair);
+    int i = pair_index(pair), sl = find_slot(pair, A.tf);
+    if (i < 0) { LeaveCriticalSection(&A.cs); return; }
+    p = A.pos[i]; price = sl >= 0 ? A.cache[sl].price : A.price;
+    LeaveCriticalSection(&A.cs);
+    if (!(p.entry > 0 && p.size != 0 && price > 0)) return;
+    if (p.opened <= 0) p.opened = (long long)time(NULL);
+    char path[160]; snprintf(path, sizeof path, "/range?pair=%s&since=%lld", pair, p.opened);
+    char *b = http_get(path);
+    if (b) { parse_range(b, &p); free(b); }
+    double hi = p.have_range ? p.hi : price, lo = p.have_range ? p.lo : price;
+    if (price > hi) hi = price;
+    if (price < lo) lo = price;
+    double usd = (price - p.entry) * p.size, pct = (price / p.entry - 1.0) * 100.0 * (p.size > 0 ? 1 : -1);
+    double mfe, mae, mfe_usd, mae_usd; excursions(&p, hi, lo, &mfe, &mae, &mfe_usd, &mae_usd);
+    long long now = (long long)time(NULL);
+    char t_open[32], t_close[32], t_hi[32], t_lo[32];
+    iso(p.opened, t_open, sizeof t_open); iso(now, t_close, sizeof t_close); iso(p.have_range ? p.hi_t : now, t_hi, sizeof t_hi); iso(p.have_range ? p.lo_t : now, t_lo, sizeof t_lo);
+    int fresh = GetFileAttributesA(A.logpath) == INVALID_FILE_ATTRIBUTES;
+    FILE *f = fopen(A.logpath, "ab");
+    if (f) {
+        if (fresh) fprintf(f, "closed_utc,pair,side,entry,size,opened_utc,exit,pnl_usd,pnl_pct,highest,highest_utc,lowest,lowest_utc,max_favorable_pct,max_adverse_pct,max_favorable_usd,max_adverse_usd,duration_s\r\n");
+        fprintf(f, "%s,%s,%s,%.10g,%.10g,%s,%.10g,%.2f,%.4f,%.10g,%s,%.10g,%s,%.4f,%.4f,%.2f,%.2f,%lld\r\n", t_close, pair, p.size > 0 ? "long" : "short", p.entry, p.size, t_open,
+                price, usd, pct, hi, t_hi, lo, t_lo, mfe, mae, mfe_usd, mae_usd, now - p.opened);
+        fclose(f);
+    }
+    EnterCriticalSection(&A.cs);
+    i = pair_index(pair);
+    if (i >= 0) { memset(&A.pos[i], 0, sizeof A.pos[i]); save_pos(pair, &A.pos[i]); }
+    A.last.valid = 1; A.last.when = GetTickCount(); A.last.pct = pct; A.last.usd = usd; A.last.mfe = mfe; A.last.mae = mae; snprintf(A.last.pair, sizeof A.last.pair, "%s", pair);
+    LeaveCriticalSection(&A.cs);
+}
+
 static DWORD WINAPI worker(LPVOID arg)
 {
     (void)arg;
@@ -248,6 +320,7 @@ static DWORD WINAPI worker(LPVOID arg)
     while (!A.quit) {
         if (!A.ip[0] || GetTickCount() - last_resolve > 300000) { resolve(); last_resolve = GetTickCount(); }
         DWORD now = GetTickCount();
+        if (A.close_req) { A.close_req = 0; do_close(); PostMessage(A.hwnd, WM_DATA, 0, 0); }
         if (last_pairs == 0 || now - last_pairs > 60000) { fetch_pairs(); last_pairs = now; PostMessage(A.hwnd, WM_DATA, 0, 0); }
         char pair[24], sig[24] = ""; int tf, bars, incremental = 0;
         EnterCriticalSection(&A.cs);
@@ -262,6 +335,7 @@ static DWORD WINAPI worker(LPVOID arg)
         if (incremental) snprintf(path, sizeof path, "/candles?pair=%s&tf=%s&n=2&sig=%s", pair, TFS[tf], sig);
         else snprintf(path, sizeof path, "/candles?pair=%s&tf=%s&n=%d", pair, TFS[tf], bars);
         char *b = http_get(path);
+        if (!b) { if (!A.ip[0]) resolve(); b = http_get(path); }                  /* the connection was lost (a restarted server, say): once more at once, over a new one */
         EnterCriticalSection(&A.cs);
         if (b) {
             double price = get_num(b, "price"), age = get_num(b, "age_ms"); int complete = strstr(b, "\"complete\":true") != NULL;
@@ -307,6 +381,20 @@ static DWORD WINAPI worker(LPVOID arg)
             free(b);
         } else { A.failed = 1; if (!g_conn) A.ip[0] = 0; }          /* the connection is gone: look the name up again next time */
         LeaveCriticalSection(&A.cs);
+        /* while a position is open: its highest and lowest price since entry, every five seconds, asked of the server (so a window that was closed meanwhile loses nothing) */
+        { static DWORD last_range; DWORD t2 = GetTickCount();
+          if (t2 - last_range > 5000) {
+              last_range = t2;
+              EnterCriticalSection(&A.cs);
+              int pi = pair_index(pair); Position pp = pi >= 0 ? A.pos[pi] : (Position){0};
+              LeaveCriticalSection(&A.cs);
+              if (pp.entry > 0 && pp.size != 0) {
+                  if (pp.opened <= 0) { EnterCriticalSection(&A.cs); if (pi >= 0 && A.pos[pi].opened <= 0) { A.pos[pi].opened = (long long)time(NULL); save_pos(pair, &A.pos[pi]); pp.opened = A.pos[pi].opened; } LeaveCriticalSection(&A.cs); }
+                  char rp[160]; snprintf(rp, sizeof rp, "/range?pair=%s&since=%lld", pair, pp.opened);
+                  char *rb = http_get(rp);
+                  if (rb) { EnterCriticalSection(&A.cs); pi = pair_index(pair); if (pi >= 0) parse_range(rb, &A.pos[pi]); LeaveCriticalSection(&A.cs); free(rb); }
+              }
+          } }
         PostMessage(A.hwnd, WM_DATA, 0, 0);
         WaitForSingleObject(A.wake, 1000);
     }
@@ -388,7 +476,7 @@ static void paint(HDC dc, int W, int H)
     if (n > 0) { fmt_price(price, buf, sizeof buf); text(dc, fp, COL_TXT, W - U(6), U(1), buf, 1); }
     int top = U(22), bot = H - U(40);
     if (!have || n == 0) {
-        text(dc, fn, failed ? COL_DOWN : COL_DIM, W / 2, H / 2 - U(8), failed ? "no data from the server" : "loading...", 2);
+        text(dc, fn, failed ? COL_DOWN : COL_DIM, W / 2, H / 2 - U(8), failed ? "no connection to the server" : "loading...", 2);
     } else {
         /* the chart */
         int rpad = U(12);                                          /* black space at the right, to see the newest candle move */
@@ -446,16 +534,26 @@ static void paint(HDC dc, int W, int H)
         { HPEN pen = CreatePen(PS_SOLID, 1, RGB(70, 80, 92)); HGDIOBJ old = SelectObject(dc, pen); MoveToEx(dc, U(4), ypl, NULL); LineTo(dc, W - U(4), ypl); SelectObject(dc, old); DeleteObject(pen); }
         fmt_price(hi - pad, buf, sizeof buf); text(dc, fs, COL_DIM, U(5), top - U(1), buf, 0);
         fmt_price(lo + pad, buf, sizeof buf); text(dc, fs, COL_DIM, U(5), bot - U(11), buf, 0);
-        if (age > 20000) { snprintf(buf, sizeof buf, "%d s old", (int)(age / 1000)); text(dc, fs, COL_ENTRY, W - U(5), top - U(1), buf, 1); }
+        if (failed) text(dc, fs, COL_DOWN, W - U(5), top - U(1), "no connection: showing the last data", 1);          /* the chart stays, as it was */
+        else if (age > 20000) { snprintf(buf, sizeof buf, "%d s old", (int)(age / 1000)); text(dc, fs, COL_ENTRY, W - U(5), top - U(1), buf, 1); }
         else if (!complete) text(dc, fs, COL_DIM, W - U(5), top - U(1), "history loading", 1);
     }
 
     /* the footer: profit and loss */
     int fy = H - U(38);
-    if (A.editing) {
-        snprintf(buf, sizeof buf, "%s> %s_", A.editing == 'e' ? "entry price" : "size (coins, - short)", A.edit);
-        text(dc, fn, COL_ENTRY, U(6), fy + U(4), buf, 0);
-        text(dc, fs, COL_DIM, U(6), fy + U(22), "Enter accepts, Esc cancels", 0);
+    if (A.editing) {                                             /* two boxes: Tab goes between them */
+        static const char *LAB[2] = { "Entry price", "Amount (- short)" };
+        static const char *HINT[2] = { "Tab: next box", "Enter or mouse out: done" };
+        for (int k = 0; k < 2; k++) {
+            int ry = fy + U(1) + k * U(19);
+            text(dc, fn, k == A.field ? COL_ENTRY : COL_DIM, U(6), ry + U(1), LAB[k], 0);
+            int bx0 = U(104), bx1 = U(196);
+            rect(dc, bx0, ry, bx1, ry + U(17), k == A.field ? RGB(40, 48, 60) : RGB(26, 32, 40));
+            if (k == A.field) { HPEN pn = CreatePen(PS_SOLID, 1, COL_ENTRY); HGDIOBJ op = SelectObject(dc, pn), ob = SelectObject(dc, GetStockObject(NULL_BRUSH)); Rectangle(dc, bx0, ry, bx1, ry + U(17)); SelectObject(dc, op); SelectObject(dc, ob); DeleteObject(pn); }
+            snprintf(buf, sizeof buf, "%s%s", A.edit[k], k == A.field ? "_" : "");
+            text(dc, fn, COL_TXT, bx0 + U(4), ry + U(1), buf, 0);
+            text(dc, fs, COL_DIM, W - U(6), ry + U(3), HINT[k], 1);
+        }
     } else if (pos.entry > 0 && pos.size != 0 && n > 0) {
         double usd = (price - pos.entry) * pos.size;
         double pct = (price / pos.entry - 1.0) * 100.0 * (pos.size > 0 ? 1 : -1);
@@ -463,11 +561,23 @@ static void paint(HDC dc, int W, int H)
         snprintf(buf, sizeof buf, "%+.2f%%", pct); fmt_money(usd, buf2, sizeof buf2);
         text(dc, fp, col, U(6), fy, buf, 0);
         text(dc, fp, col, W - U(6), fy, buf2, 1);
-        if (A.active) text(dc, fs, COL_DIM, U(6), fy + U(22), "up/down time  left/right coin  e s  del  q quit", 0);
-        else { fmt_price(pos.entry, buf, sizeof buf); snprintf(buf2, sizeof buf2, "%.6g @ %s", pos.size, buf); text(dc, fs, COL_DIM, U(6), fy + U(22), buf2, 0); }
+        if (A.active) text(dc, fs, COL_DIM, U(6), fy + U(22), "up/down time  left/right coin  e position  x close  q quit", 0);
+        else {
+            fmt_price(pos.entry, buf, sizeof buf);
+            if (pos.have_range) { double mfe, mae, a1, a2; excursions(&pos, pos.hi > price ? pos.hi : price, pos.lo < price ? pos.lo : price, &mfe, &mae, &a1, &a2);
+                snprintf(buf2, sizeof buf2, "%.6g @ %s   best %+.2f%%  worst %+.2f%%", pos.size, buf, mfe, mae); }
+            else snprintf(buf2, sizeof buf2, "%.6g @ %s", pos.size, buf);
+            text(dc, fs, COL_DIM, U(6), fy + U(22), buf2, 0);
+        }
+    } else if (A.last.valid && GetTickCount() - A.last.when < 30000 && !strcmp(A.last.pair, pair)) {      /* the trade just closed */
+        COLORREF col = A.last.usd > 0 ? COL_UP : A.last.usd < 0 ? COL_DOWN : COL_TXT;
+        snprintf(buf, sizeof buf, "closed %+.2f%%", A.last.pct); fmt_money(A.last.usd, buf2, sizeof buf2);
+        text(dc, fp, col, U(6), fy, buf, 0); text(dc, fp, col, W - U(6), fy, buf2, 1);
+        snprintf(buf, sizeof buf, "best %+.2f%%  worst %+.2f%%   logged", A.last.mfe, A.last.mae);
+        text(dc, fs, COL_DIM, U(6), fy + U(22), buf, 0);
     } else {
         text(dc, fn, COL_DIM, U(6), fy + U(4), "no position", 0);
-        text(dc, fs, COL_DIM, U(6), fy + U(22), A.active ? "e entry price   s size   x or q quit" : "click, then e / s to enter a position", 0);
+        text(dc, fs, COL_DIM, U(6), fy + U(22), A.active ? "e enter a position   q quit" : "click, then e to enter a position", 0);
     }
     for (int k = 0; k < 3; k++) {                                /* the toggles: a filled dot is on, a ring is off */
         int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r);
@@ -584,7 +694,7 @@ static void tray_add(void)
     NOTIFYICONDATAA nd; memset(&nd, 0, sizeof nd);
     nd.cbSize = sizeof nd; nd.hWnd = A.hwnd; nd.uID = ID_TRAY; nd.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nd.uCallbackMessage = WM_TRAY; nd.hIcon = A.icon;
-    snprintf(nd.szTip, sizeof nd.szTip, "candlewin: click to show or hide");
+    snprintf(nd.szTip, sizeof nd.szTip, "wincan: click to show or hide");
     Shell_NotifyIconA(NIM_ADD, &nd);
 }
 static void tray_del(void) { NOTIFYICONDATAA nd; memset(&nd, 0, sizeof nd); nd.cbSize = sizeof nd; nd.hWnd = A.hwnd; nd.uID = ID_TRAY; Shell_NotifyIconA(NIM_DELETE, &nd); }
@@ -608,6 +718,7 @@ static void change_pair(int dir)
     if (n > 0) { i = i < 0 ? 0 : (i + dir + n) % n; snprintf(A.pair, sizeof A.pair, "%s", A.pairs[i]); }
     show_cached();
     LeaveCriticalSection(&A.cs);
+    save_all();                                              /* kept at once: a restart, or the program being ended, loses nothing */
     wake(); InvalidateRect(A.hwnd, NULL, FALSE);
 }
 
@@ -617,15 +728,28 @@ static void change_tf(int dir)
     A.tf = (A.tf + dir + NTF) % NTF;
     show_cached();
     LeaveCriticalSection(&A.cs);
+    save_all();
     wake(); InvalidateRect(A.hwnd, NULL, FALSE);
 }
 
-static void commit_edit(void)
+static void open_editor(void)
 {
-    double v = strtod(A.edit, NULL);
     Position *p = cur_pos();
-    if (A.editing == 'e') p->entry = v > 0 ? v : 0;
-    else if (A.editing == 's') p->size = v;
+    A.editing = 1; A.field = 0; A.fresh[0] = A.fresh[1] = 1;
+    A.edit[0][0] = A.edit[1][0] = 0;
+    if (p->entry > 0) snprintf(A.edit[0], sizeof A.edit[0], "%.10g", p->entry);
+    if (p->size != 0) snprintf(A.edit[1], sizeof A.edit[1], "%.10g", p->size);
+    InvalidateRect(A.hwnd, NULL, FALSE);
+}
+
+static void commit_edit(void)                     /* Enter: both boxes; a box left empty keeps what it held */
+{
+    Position *p = cur_pos();
+    int had = p->entry > 0 && p->size != 0;
+    if (A.edit[0][0]) { double v = strtod(A.edit[0], NULL); p->entry = v > 0 ? v : 0; }
+    if (A.edit[1][0]) p->size = strtod(A.edit[1], NULL);
+    if (!(p->entry > 0 && p->size != 0)) { memset(p, 0, sizeof *p); }
+    else if (!had || p->opened <= 0) { p->opened = (long long)time(NULL); p->have_range = 0; }      /* a new position starts now; correcting one keeps its time */
     save_pos(A.pair, p);
     A.editing = 0;
     InvalidateRect(A.hwnd, NULL, FALSE);
@@ -648,6 +772,11 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_ERASEBKGND: return 1;
     case WM_DATA:
         InvalidateRect(h, NULL, FALSE);
+        if (A.test_close) {                                       /* a test: close the trade once there is a price, then leave */
+            static int asked; EnterCriticalSection(&A.cs); int ready = A.have && A.price > 0; LeaveCriticalSection(&A.cs);
+            if (A.last.valid) { quit_app(); return 0; }
+            if (ready && !asked) { asked = 1; A.close_req = 1; wake(); }
+        }
         if (A.shot && !A.shot_done) {
             EnterCriticalSection(&A.cs); int ready = A.have && A.complete; LeaveCriticalSection(&A.cs);
             static int tries; if (ready || ++tries > 12) { A.shot_done = 1; save_bmp(A.shot, win_w(), win_h()); quit_app(); }
@@ -685,7 +814,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_MOUSELEAVE:
         A.tracking = 0;
         if (A.hover != -1) { A.hover = -1; InvalidateRect(h, NULL, FALSE); }
-        if (A.active && !A.dragging && !A.editing) give_up_keyboard();               /* the mouse out of the window: it gives the keyboard back at once */
+        if (A.active && !A.dragging) {                                              /* the mouse out of the window: it gives the keyboard back at once, */
+            if (A.editing) commit_edit();                                           /* and that, like Enter, means the position has been entered */
+            give_up_keyboard();
+        }
         return 0;
     case WM_KILLFOCUS: if (A.active && !A.dragging) { A.active = 0; A.editing = 0; set_passive(1); InvalidateRect(h, NULL, FALSE); } return 0;
     case WM_KEYDOWN:
@@ -701,23 +833,28 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         return 0;
     case WM_CHAR:
         if (A.editing) {
-            size_t n = strlen(A.edit);
-            if (w == '\r') commit_edit();
-            else if (w == '\b') { if (n) A.edit[n - 1] = 0; }
-            else if ((w >= '0' && w <= '9') || w == '.' || w == '-' || w == ',') { if (n < sizeof A.edit - 1) { A.edit[n] = w == ',' ? '.' : (char)w; A.edit[n + 1] = 0; } }
+            char *e = A.edit[A.field]; size_t n = strlen(e);
+            if (w == '\r') { commit_edit(); return 0; }
+            else if (w == '\t') { A.field = 1 - A.field; }
+            else if (w == '\b') { A.fresh[A.field] = 0; if (n) e[n - 1] = 0; }
+            else if ((w >= '0' && w <= '9') || w == '.' || w == '-' || w == ',') {
+                if (A.fresh[A.field]) { e[0] = 0; n = 0; A.fresh[A.field] = 0; }      /* the first key replaces what the box held */
+                if (n < sizeof A.edit[0] - 1) { e[n] = w == ',' ? '.' : (char)w; e[n + 1] = 0; }
+            }
             InvalidateRect(h, NULL, FALSE);
             return 0;
         }
         switch (w) {
-        case 'x': case 'X': case 'q': case 'Q': quit_app(); break;
-        case 'e': case 'E': A.editing = 'e'; A.edit[0] = 0; InvalidateRect(h, NULL, FALSE); break;
-        case 's': case 'S': A.editing = 's'; A.edit[0] = 0; InvalidateRect(h, NULL, FALSE); break;
+        case 'q': case 'Q': quit_app(); break;
+        case 'x': case 'X': { Position *p = cur_pos(); if (p->entry > 0 && p->size != 0) { A.close_req = 1; wake(); } break; }       /* close the trade at the mark, and log it */
+        case 'e': case 'E': open_editor(); break;
         case 't': case 'T': show_hide(0); break;
-        case '+': case '=': if (A.scale < 400) { A.scale += 25; resize_window(); wake(); } break;
-        case '-': if (A.scale > 75) { A.scale -= 25; resize_window(); wake(); } break;
+        case '+': case '=': if (A.scale < 400) { A.scale += 25; resize_window(); save_all(); wake(); } break;
+        case '-': if (A.scale > 75) { A.scale -= 25; resize_window(); save_all(); wake(); } break;
         }
         return 0;
     case WM_HOTKEY: show_hide(A.hidden); return 0;
+    case WM_SHOWIT: show_hide(1); return 0;                    /* a second copy was started and found this one: show it */
     case WM_TRAY:
         if (l == WM_LBUTTONUP) show_hide(A.hidden);
         else if (l == WM_RBUTTONUP) {
@@ -746,12 +883,12 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     A.cache = calloc(40, sizeof *A.cache);
     ini_path();
     char buf[128];
-    GetPrivateProfileStringA("candlewin", "server", "localhost:8766", buf, sizeof buf, A.ini); parse_server(buf);
-    GetPrivateProfileStringA("candlewin", "pair", "BTC", A.pair, sizeof A.pair, A.ini);
-    char tfs[8]; GetPrivateProfileStringA("candlewin", "tf", "5m", tfs, sizeof tfs, A.ini);
+    GetPrivateProfileStringA("wincan", "server", "localhost:8766", buf, sizeof buf, A.ini); parse_server(buf);
+    GetPrivateProfileStringA("wincan", "pair", "BTC", A.pair, sizeof A.pair, A.ini);
+    char tfs[8]; GetPrivateProfileStringA("wincan", "tf", "5m", tfs, sizeof tfs, A.ini);
     A.tf = 2; for (int i = 0; i < NTF; i++) if (!strcmp(tfs, TFS[i])) A.tf = i;
-    A.ind[0] = GetPrivateProfileIntA("candlewin", "bollinger", 1, A.ini); A.ind[1] = GetPrivateProfileIntA("candlewin", "ma9", 1, A.ini); A.ind[2] = GetPrivateProfileIntA("candlewin", "ma200", 1, A.ini); A.hover = -1;
-    A.scale = GetPrivateProfileIntA("candlewin", "scale", 100, A.ini); if (A.scale < 75 || A.scale > 400) A.scale = 100;
+    A.ind[0] = GetPrivateProfileIntA("wincan", "bollinger", 1, A.ini); A.ind[1] = GetPrivateProfileIntA("wincan", "ma9", 1, A.ini); A.ind[2] = GetPrivateProfileIntA("wincan", "ma200", 1, A.ini); A.hover = -1;
+    A.scale = GetPrivateProfileIntA("wincan", "scale", 100, A.ini); if (A.scale < 75 || A.scale > 400) A.scale = 100;
     int server_given = 0, argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; i++) {
         char a[256]; WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, a, sizeof a, NULL, NULL);
@@ -762,25 +899,36 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
         else if (!strcmp(a, "--shot") && i + 1 < argc) { static char shot[260]; snprintf(shot, sizeof shot, "%s", nx); A.shot = shot; i++; }
         else if (!strcmp(a, "--shot-position") && i + 1 < argc) { sscanf(nx, "%lf,%lf", &A.shot_entry, &A.shot_size); i++; }
         else if (!strcmp(a, "--shot-active")) A.shot_active = 1;
+        else if (!strcmp(a, "--test-close")) A.test_close = 1;
+        else if (!strcmp(a, "--shot-editor")) A.shot_editor = 1;
         else if (!strcmp(a, "--shot-hover") && i + 1 < argc) { A.hover = atoi(nx); i++; }
         else if (!strcmp(a, "--shot-off") && i + 1 < argc) { A.ind[atoi(nx) % 3] = 0; i++; }
-        else if (!strcmp(a, "--version")) { MessageBoxA(NULL, "candlewin " PACKAGE_VERSION, "candlewin", MB_OK); return 0; }
+        else if (!strcmp(a, "--version")) { MessageBoxA(NULL, "wincan " PACKAGE_VERSION, "wincan", MB_OK); return 0; }
     }
     if (server_given && !A.shot) save_all();                       /* the server given on the command line is kept */
+    if (!A.shot && !A.test_close) {                              /* one copy only: another that finds this one says so (it shows the window) and leaves */
+        HANDLE once = CreateMutexA(NULL, TRUE, "Local\\wincan-single-instance");
+        if (once && GetLastError() == ERROR_ALREADY_EXISTS) {
+            HWND other = FindWindowA("wincan", NULL);
+            if (other) PostMessage(other, WM_SHOWIT, 0, 0);
+            return 0;
+        }
+    }
     A.wake = CreateEvent(NULL, FALSE, FALSE, NULL);
     A.taskbar_created = RegisterWindowMessageA("TaskbarCreated");
     A.icon = make_icon();
     WNDCLASSA wc; memset(&wc, 0, sizeof wc);
-    wc.lpfnWndProc = wndproc; wc.hInstance = hi; wc.lpszClassName = "candlewin"; wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.hIcon = A.icon;
+    wc.lpfnWndProc = wndproc; wc.hInstance = hi; wc.lpszClassName = "wincan"; wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.hIcon = A.icon;
     RegisterClassA(&wc);
     RECT wa; SystemParametersInfo(SPI_GETWORKAREA, 0, &wa, 0);
     A.active = A.shot_active;
+    if (A.shot_editor) { A.editing = 1; A.field = 1; snprintf(A.edit[0], sizeof A.edit[0], "61000"); snprintf(A.edit[1], sizeof A.edit[1], "0.5"); }
     int W = win_w(), H = win_h();
     /* the first time, the top left corner of the screen; a saved place is kept only if the whole window is on a screen (all the monitors count) */
     int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN), vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    int x = GetPrivateProfileIntA("candlewin", "x", wa.left + 8, A.ini), y = GetPrivateProfileIntA("candlewin", "y", wa.top + 8, A.ini);
+    int x = GetPrivateProfileIntA("wincan", "x", wa.left + 8, A.ini), y = GetPrivateProfileIntA("wincan", "y", wa.top + 8, A.ini);
     if (x < vx || y < vy || x + W > vx + vw || y + H > vy + vh) { x = wa.left + 8; y = wa.top + 8; }
-    A.hwnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_APPWINDOW | WS_EX_NOACTIVATE, "candlewin", "candlewin", WS_POPUP, x, y, W, H, NULL, NULL, hi, NULL);
+    A.hwnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_APPWINDOW | WS_EX_NOACTIVATE, "wincan", "wincan", WS_POPUP, x, y, W, H, NULL, NULL, hi, NULL);
     if (!A.hwnd) return 1;
     tray_add();
     RegisterHotKey(A.hwnd, ID_HOTKEY, MOD_CONTROL | MOD_ALT, 'C');

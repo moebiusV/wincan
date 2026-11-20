@@ -1,5 +1,5 @@
 candled
-candlewin.exe
+wincan.exe
 test_agg
 Makefile
 *.tar.gz

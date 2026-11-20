@@ -57,6 +57,17 @@ static int is_marker(const Rec *r) { return r->N == 0xFFFFFFFFu && r->V == -1.0f
 
 static void unframe(const unsigned char *f, Rec *r) { memcpy(r, f + 1, sizeof *r); }
 
+/* a candle that can be believed: positive prices, the high and low around the open and close, and nothing that moved by half in 100 ms
+ * (a collector killed in mid-write has left frames with garbage in them that still start with '{' and end with '}') */
+static int sane(const Rec *r)
+{
+    if (!(r->O > 0 && r->C > 0 && r->H > 0 && r->L > 0)) return 0;                 /* also NaN */
+    float mx = r->O > r->C ? r->O : r->C, mn = r->O < r->C ? r->O : r->C;
+    if (r->H < mx * 0.9999f || r->L > mn * 1.0001f) return 0;
+    if (r->H > mx * 1.5f || r->L < mn * 0.5f) return 0;
+    return 1;
+}
+
 /* a frame starts at b[p] and, as far as there are bytes, so do the next two */
 static int strong(const unsigned char *b, int64_t len, int64_t p)
 {
@@ -104,16 +115,21 @@ static int64_t start_time(const unsigned char *b, const int64_t *offs, int64_t n
 /* fold the frames, the first candle being at t_first_ms; returns the time of the next candle */
 static int64_t fold(Series *s, const unsigned char *b, const int64_t *offs, int64_t n, int64_t t_first_ms, int before)
 {
-    Bar cur; int64_t curmin = 0; int have = 0;
+    Bar cur; int64_t curmin = 0; int have = 0, real = 0;
     int64_t t = t_first_ms;
     for (int64_t k = 0; k < n; k++) {
         Rec r; unframe(b + offs[k], &r);
         if (is_marker(&r)) { uint32_t ts; memcpy(&ts, &r.O, 4); t = (int64_t)ts * 1000; continue; }
         int64_t tc = t; t += REC_MS;
-        if (!(r.C > 0) || !(r.H > 0) || !(r.L > 0) || !(r.O > 0)) continue;     /* NaN, zero or negative: not a price */
+        if (!sane(&r)) continue;                                                  /* garbage: not a candle */
+        if (!(r.V >= 0 && r.V < 1e13f)) r.V = 0;                                  /* a garbage volume does not spoil the price */
         int64_t m = floor_div(tc, 60000);
         if (have && m != curmin) { merge(s, curmin, &cur, before); have = 0; }
-        if (!have) { cur.o = r.O; cur.h = r.H; cur.l = r.L; cur.c = r.C; cur.v = r.V; cur.has = 1; curmin = m; have = 1; }
+        /* a forward-filled candle (no trade: N == 0) only repeats the last price: it must not become a minute's open, high or low, as an exchange's
+         * candle opens at the first trade of the minute */
+        if (!have) { cur.o = r.O; cur.h = r.H; cur.l = r.L; cur.c = r.C; cur.v = r.V; cur.has = 1; curmin = m; have = 1; real = r.N != 0; }
+        else if (r.N == 0) { cur.c = r.C; }
+        else if (!real) { cur.o = r.O; cur.h = r.H; cur.l = r.L; cur.c = r.C; cur.v += r.V; real = 1; }
         else { if (r.H > cur.h) cur.h = r.H; if (r.L < cur.l) cur.l = r.L; cur.c = r.C; cur.v += r.V; }
     }
     if (have) merge(s, curmin, &cur, before);
@@ -176,7 +192,7 @@ static float last_close(int fd, int64_t size)
     int64_t n = locate(b, got, got, 0, offs, 500, &end);
     for (int64_t i = n - 1; i >= 0; i--) {
         Rec r; unframe(b + offs[i], &r);
-        if (!is_marker(&r) && r.C > 0) return r.C;
+        if (!is_marker(&r) && sane(&r)) return r.C;
     }
     return 0;
 }
@@ -323,6 +339,33 @@ void series_query2(Series *p, Series *b2, int tf, int n, int64_t now_ms, Out *ou
         for (int i = 0; i < cnt; i++) {                                      /* oldest first */
             int j = cnt - 1 - i;
             out->t[i] = tmp.t[j]; out->o[i] = tmp.o[j]; out->h[i] = tmp.h[j]; out->l[i] = tmp.l[j]; out->c[i] = tmp.c[j]; out->v[i] = tmp.v[j];
+        }
+    }
+    if (b2) pthread_mutex_unlock(&b2->mu);
+    if (p) pthread_mutex_unlock(&p->mu);
+}
+
+void series_range2(Series *p, Series *b2, int64_t since_sec, Range *r)
+{
+    memset(r, 0, sizeof *r);
+    if (p) pthread_mutex_lock(&p->mu);
+    if (b2) pthread_mutex_lock(&b2->mu);
+    int64_t lp = last_minute(p), ls = last_minute(b2), last = lp > ls ? lp : ls;
+    const Series *lead = (p && lp != INT64_MIN) ? p : b2;
+    if (lead) r->price = lead->price;
+    if (last != INT64_MIN) {
+        int64_t first = floor_div(since_sec, 60);
+        int64_t oldest = INT64_MAX;
+        if (p && p->base_min < oldest) oldest = p->base_min;
+        if (b2 && b2->base_min < oldest) oldest = b2->base_min;
+        if (first < oldest) first = oldest;
+        for (int64_t m = first; m <= last; m++) {
+            const Bar *bb = bar_at(p, m);
+            if (!bb) bb = bar_at(b2, m);
+            if (!bb) continue;
+            if (r->n == 0 || bb->h > r->high) { r->high = bb->h; r->high_t = m * 60; }
+            if (r->n == 0 || bb->l < r->low)  { r->low = bb->l;  r->low_t = m * 60; }
+            r->n++;
         }
     }
     if (b2) pthread_mutex_unlock(&b2->mu);
