@@ -8,7 +8,7 @@ A small candle chart window for Windows, with its server.
   wincan.exe  (the window) 300x175 pixels, no frame, border or title bar, always on top, never takes the keyboard until it is
                  clicked, and gives it back when the mouse leaves.  Candles and last price of one coin; Up/Down changes the
                  timeframe (1m 3m 5m 15m 30m 1h 4h 1d 1w), Left/Right the coin; type an entry price (e) and a size (s) and it
-                 shows the profit or loss in green or red, as a percentage and in dollars; x closes the trade at the mark and appends it to a log with the best and worst the trade went through.  Tray icon and Ctrl+Alt+C hide and
+                 shows the profit or loss in green or red, as a percentage and in dollars; e opens an editor for the position (price, amount, leverage, realized P\&L; it resumes at the box last edited) and x closes the trade at the mark and appends it to a log with the best and worst the trade went through.  Tray icon and Ctrl+Alt+C hide and
                  show it.
 
 See wincan(1), candled(8) and wincan(5) for the details, and INSTALL to build and run them.

@@ -39,6 +39,8 @@ static const char *TFS[] = { "1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "
 
 typedef struct {
     double entry, size;                  /* size in coins, negative for a short */
+    double leverage;                     /* 0 = not given (the margin is then the whole value) */
+    double realized;                     /* profit or loss already taken on this position, dollars */
     long long opened;                    /* when the position was entered (Unix seconds) */
     double hi, lo; long long hi_t, lo_t; int have_range;      /* the highest and lowest price since, and when (from the server) */
 } Position;
@@ -61,13 +63,14 @@ static struct {
     /* ui */
     int    ind[3], hover;                 /* indicators on/off: Bollinger bands, 9 MA, 200 MA; the dot the mouse is over (-1: none) */
     int    active, dragging, editing, tracking, hidden;   /* editing: the position editor is open */
-    int    field, fresh[2];                /* the box being typed in (0 entry price, 1 amount); a box's first key replaces what it held */
-    char   edit[2][32];
+    int    field_last;                    /* the box last edited: e resumes there (kept in the settings) */
+    int    field, fresh[4];                /* the box being typed in (0 entry price, 1 amount, 2 leverage, 3 realized P&L); a box's first key replaces what it held */
+    char   edit[4][32];
     HWND   prev;                         /* the window that had the keyboard before a click */
     char   ini[MAX_PATH], logpath[MAX_PATH];
     volatile int close_req;              /* x was pressed: the worker closes the trade at the mark */
     struct { int valid; DWORD when; double pct, usd, mfe, mae; char pair[24]; } last;     /* the trade closed last, shown for a while */
-    const char *shot; int shot_done; double shot_entry, shot_size; int shot_active, shot_editor, test_close;
+    const char *shot; int shot_done; double shot_entry, shot_size, shot_lev, shot_real; int shot_active, shot_editor, test_close;
     UINT   taskbar_created;
     HICON  icon;
 } A;
@@ -89,16 +92,16 @@ static int pair_index(const char *p) { for (int i = 0; i < A.npairs; i++) if (!s
 
 static void ini_get_pos(const char *pair, Position *p)
 {
-    char buf[64] = "";
+    char buf[160] = "";
     GetPrivateProfileStringA("positions", pair, "", buf, sizeof buf, A.ini);
     memset(p, 0, sizeof *p);
-    if (buf[0]) sscanf(buf, "%lf,%lf,%lld", &p->entry, &p->size, &p->opened);
+    if (buf[0]) sscanf(buf, "%lf,%lf,%lld,%lf,%lf", &p->entry, &p->size, &p->opened, &p->leverage, &p->realized);
 }
 
 static void save_pos(const char *pair, const Position *p)
 {
-    char buf[64];
-    if (p->entry > 0 && p->size != 0) snprintf(buf, sizeof buf, "%.10g,%.10g,%lld", p->entry, p->size, p->opened);
+    char buf[160];
+    if (p->entry > 0 && p->size != 0) snprintf(buf, sizeof buf, "%.10g,%.10g,%lld,%.10g,%.10g", p->entry, p->size, p->opened, p->leverage, p->realized);
     else buf[0] = 0;
     WritePrivateProfileStringA("positions", pair, buf[0] ? buf : NULL, A.ini);
 }
@@ -106,7 +109,7 @@ static void save_pos(const char *pair, const Position *p)
 static Position *cur_pos(void)
 {
     static Position none;
-    if (A.shot && A.shot_entry > 0) { memset(&none, 0, sizeof none); none.entry = A.shot_entry; none.size = A.shot_size; none.opened = 1; return &none; }
+    if (A.shot && A.shot_entry > 0) { memset(&none, 0, sizeof none); none.entry = A.shot_entry; none.size = A.shot_size; none.leverage = A.shot_lev; none.realized = A.shot_real; none.opened = 1; return &none; }
     int i = pair_index(A.pair);
     if (i < 0) { ini_get_pos(A.pair, &none); return &none; }
     return &A.pos[i];
@@ -119,6 +122,7 @@ static void save_all(void)
     WritePrivateProfileStringA("wincan", "pair", A.pair, A.ini);
     WritePrivateProfileStringA("wincan", "tf", TFS[A.tf], A.ini);
     snprintf(b, sizeof b, "%d", A.scale); WritePrivateProfileStringA("wincan", "scale", b, A.ini);
+    { char ef[8]; snprintf(ef, sizeof ef, "%d", A.field_last); WritePrivateProfileStringA("wincan", "editfield", ef, A.ini); }
     WritePrivateProfileStringA("wincan", "bollinger", A.ind[0] ? "1" : "0", A.ini);
     WritePrivateProfileStringA("wincan", "ma9", A.ind[1] ? "1" : "0", A.ini);
     WritePrivateProfileStringA("wincan", "ma200", A.ind[2] ? "1" : "0", A.ini);
@@ -258,13 +262,27 @@ static void iso(long long t, char *out, size_t cap)
 }
 
 /* the best and worst of the trade as a percentage from the entry and in dollars: the highest and lowest price since entry, the entry itself and the exit counting */
+/* a position's figures at a price: the profit or loss in dollars (the move times the size, then what was already realized), the margin tied up (the value divided
+ * by the leverage; the whole value if no leverage is given) and the return on that margin, in per cent */
+typedef struct { double unreal, total, margin, pct; } Fig;
+static Fig figures(const Position *p, double price)
+{
+    Fig f;
+    f.unreal = (price - p->entry) * p->size; f.total = f.unreal + p->realized;
+    double notional = p->entry * fabs(p->size);
+    f.margin = p->leverage > 0 ? notional / p->leverage : notional;
+    f.pct = f.margin > 0 ? f.total / f.margin * 100.0 : 0;
+    return f;
+}
+
+/* the best and the worst the trade went through, from the entry: the unrealized dollars and as a return on the margin (what was realized is not part of it, it is logged apart); the highest and lowest price since entry count, and the entry */
 static void excursions(const Position *p, double hi, double lo, double *mfe, double *mae, double *mfe_usd, double *mae_usd)
 {
     if (hi < p->entry) hi = p->entry;
     if (lo > p->entry) lo = p->entry;
-    double best = p->size > 0 ? hi : lo, worst = p->size > 0 ? lo : hi, sgn = p->size > 0 ? 1 : -1;
-    *mfe = (best / p->entry - 1.0) * 100.0 * sgn;  *mae = (worst / p->entry - 1.0) * 100.0 * sgn;
-    *mfe_usd = (best - p->entry) * p->size;        *mae_usd = (worst - p->entry) * p->size;
+    double best = p->size > 0 ? hi : lo, worst = p->size > 0 ? lo : hi;
+    Fig fb = figures(p, best), fw = figures(p, worst);
+    *mfe = fb.margin > 0 ? fb.unreal / fb.margin * 100.0 : 0; *mae = fw.margin > 0 ? fw.unreal / fw.margin * 100.0 : 0; *mfe_usd = fb.unreal; *mae_usd = fw.unreal;
 }
 
 static void parse_range(const char *b, Position *p)
@@ -291,7 +309,8 @@ static void do_close(void)
     double hi = p.have_range ? p.hi : price, lo = p.have_range ? p.lo : price;
     if (price > hi) hi = price;
     if (price < lo) lo = price;
-    double usd = (price - p.entry) * p.size, pct = (price / p.entry - 1.0) * 100.0 * (p.size > 0 ? 1 : -1);
+    Fig fg = figures(&p, price);
+    double usd = fg.total, pct = fg.pct;
     double mfe, mae, mfe_usd, mae_usd; excursions(&p, hi, lo, &mfe, &mae, &mfe_usd, &mae_usd);
     long long now = (long long)time(NULL);
     char t_open[32], t_close[32], t_hi[32], t_lo[32];
@@ -299,9 +318,9 @@ static void do_close(void)
     int fresh = GetFileAttributesA(A.logpath) == INVALID_FILE_ATTRIBUTES;
     FILE *f = fopen(A.logpath, "ab");
     if (f) {
-        if (fresh) fprintf(f, "closed_utc,pair,side,entry,size,opened_utc,exit,pnl_usd,pnl_pct,highest,highest_utc,lowest,lowest_utc,max_favorable_pct,max_adverse_pct,max_favorable_usd,max_adverse_usd,duration_s\r\n");
-        fprintf(f, "%s,%s,%s,%.10g,%.10g,%s,%.10g,%.2f,%.4f,%.10g,%s,%.10g,%s,%.4f,%.4f,%.2f,%.2f,%lld\r\n", t_close, pair, p.size > 0 ? "long" : "short", p.entry, p.size, t_open,
-                price, usd, pct, hi, t_hi, lo, t_lo, mfe, mae, mfe_usd, mae_usd, now - p.opened);
+        if (fresh) fprintf(f, "closed_utc,pair,side,leverage,entry,size,opened_utc,exit,unrealized_usd,realized_usd,total_usd,margin_usd,roe_pct,highest,highest_utc,lowest,lowest_utc,max_favorable_pct,max_adverse_pct,max_favorable_usd,max_adverse_usd,duration_s\r\n");
+        fprintf(f, "%s,%s,%s,%.6g,%.10g,%.10g,%s,%.10g,%.2f,%.2f,%.2f,%.2f,%.4f,%.10g,%s,%.10g,%s,%.4f,%.4f,%.2f,%.2f,%lld\r\n", t_close, pair, p.size > 0 ? "long" : "short", p.leverage, p.entry, p.size, t_open,
+                price, fg.unreal, p.realized, fg.total, fg.margin, fg.pct, hi, t_hi, lo, t_lo, mfe, mae, mfe_usd, mae_usd, now - p.opened);
         fclose(f);
     }
     EnterCriticalSection(&A.cs);
@@ -553,22 +572,24 @@ static void paint(HDC dc, int W, int H)
 
     /* the footer: profit and loss */
     int fy = H - U(38);
-    if (A.editing) {                                             /* two boxes: Tab goes between them */
-        static const char *LAB[2] = { "Entry price", "Amount (- short)" };
-        static const char *HINT[2] = { "Tab: next box", "Enter or mouse out: done" };
-        for (int k = 0; k < 2; k++) {
-            int ry = fy + U(1) + k * U(19);
-            text(dc, fn, k == A.field ? COL_ENTRY : COL_DIM, U(6), ry + U(1), LAB[k], 0);
-            int bx0 = U(104), bx1 = U(196);
-            rect(dc, bx0, ry, bx1, ry + U(17), k == A.field ? RGB(40, 48, 60) : RGB(26, 32, 40));
+    if (A.editing) {                                             /* the position editor: a panel over the lower part of the chart; Tab goes between the boxes */
+        static const char *LAB[4] = { "Entry price", "Amount (- short)", "Leverage (x)", "Realized P&L ($)" };
+        int y0 = H - U(98);
+        rect(dc, 0, y0, W, H, RGB(20, 25, 33));
+        { HPEN pn = CreatePen(PS_SOLID, 1, RGB(70, 80, 95)); HGDIOBJ op = SelectObject(dc, pn); MoveToEx(dc, 0, y0, NULL); LineTo(dc, W, y0); SelectObject(dc, op); DeleteObject(pn); }
+        for (int k = 0; k < 4; k++) {
+            int ry = y0 + U(4) + k * U(19);
+            text(dc, fn, k == A.field ? COL_ENTRY : COL_DIM, U(8), ry + U(1), LAB[k], 0);
+            int bx0 = U(118), bx1 = W - U(10);
+            rect(dc, bx0, ry, bx1, ry + U(17), k == A.field ? RGB(40, 48, 60) : RGB(28, 34, 43));
             if (k == A.field) { HPEN pn = CreatePen(PS_SOLID, 1, COL_ENTRY); HGDIOBJ op = SelectObject(dc, pn), ob = SelectObject(dc, GetStockObject(NULL_BRUSH)); Rectangle(dc, bx0, ry, bx1, ry + U(17)); SelectObject(dc, op); SelectObject(dc, ob); DeleteObject(pn); }
             snprintf(buf, sizeof buf, "%s%s", A.edit[k], k == A.field ? "_" : "");
             text(dc, fn, COL_TXT, bx0 + U(4), ry + U(1), buf, 0);
-            text(dc, fs, COL_DIM, W - U(6), ry + U(3), HINT[k], 1);
         }
+        text(dc, fs, COL_DIM, U(8), y0 + U(4) + 4 * U(19) + U(2), "Tab: next   Enter or mouse out: done   Esc: cancel", 0);
     } else if (pos.entry > 0 && pos.size != 0 && n > 0) {
-        double usd = (price - pos.entry) * pos.size;
-        double pct = (price / pos.entry - 1.0) * 100.0 * (pos.size > 0 ? 1 : -1);
+        Fig fg = figures(&pos, price);                           /* dollars: the move times the size plus what was realized; per cent: of the margin */
+        double usd = fg.total, pct = fg.pct;
         COLORREF col = usd > 0 ? COL_UP : usd < 0 ? COL_DOWN : COL_TXT;
         snprintf(buf, sizeof buf, "%+.2f%%", pct); fmt_money(usd, buf2, sizeof buf2);
         text(dc, fp, col, U(6), fy, buf, 0);
@@ -576,9 +597,12 @@ static void paint(HDC dc, int W, int H)
         if (A.active) text(dc, fs, COL_DIM, U(6), fy + U(22), "up/down time  left/right coin  e position  x close  q quit", 0);
         else {
             fmt_price(pos.entry, buf, sizeof buf);
+            char lv[16] = "", rl[24] = "";
+            if (pos.leverage > 0) snprintf(lv, sizeof lv, "  %.4gx", pos.leverage);
+            if (pos.realized != 0) snprintf(rl, sizeof rl, "  real %+.0f", pos.realized);
             if (pos.have_range) { double mfe, mae, a1, a2; excursions(&pos, pos.hi > price ? pos.hi : price, pos.lo < price ? pos.lo : price, &mfe, &mae, &a1, &a2);
-                snprintf(buf2, sizeof buf2, "%.6g @ %s   best %+.2f%%  worst %+.2f%%", pos.size, buf, mfe, mae); }
-            else snprintf(buf2, sizeof buf2, "%.6g @ %s", pos.size, buf);
+                snprintf(buf2, sizeof buf2, "%.6g @ %s%s%s  best %+.1f%% worst %+.1f%%", pos.size, buf, lv, rl, mfe, mae); }
+            else snprintf(buf2, sizeof buf2, "%.6g @ %s%s%s", pos.size, buf, lv, rl);
             text(dc, fs, COL_DIM, U(6), fy + U(22), buf2, 0);
         }
     } else if (A.last.valid && GetTickCount() - A.last.when < 30000 && !strcmp(A.last.pair, pair)) {      /* the trade just closed */
@@ -747,19 +771,23 @@ static void change_tf(int dir)
 static void open_editor(void)
 {
     Position *p = cur_pos();
-    A.editing = 1; A.field = 0; A.fresh[0] = A.fresh[1] = 1;
-    A.edit[0][0] = A.edit[1][0] = 0;
+    A.editing = 1; A.field = A.field_last >= 0 && A.field_last < 4 ? A.field_last : 0;     /* resume where the last edit was */
+    for (int k = 0; k < 4; k++) { A.fresh[k] = 1; A.edit[k][0] = 0; }
     if (p->entry > 0) snprintf(A.edit[0], sizeof A.edit[0], "%.10g", p->entry);
     if (p->size != 0) snprintf(A.edit[1], sizeof A.edit[1], "%.10g", p->size);
+    if (p->leverage > 0) snprintf(A.edit[2], sizeof A.edit[2], "%.10g", p->leverage);
+    if (p->realized != 0) snprintf(A.edit[3], sizeof A.edit[3], "%.10g", p->realized);
     InvalidateRect(A.hwnd, NULL, FALSE);
 }
 
-static void commit_edit(void)                     /* Enter: both boxes; a box left empty keeps what it held */
+static void commit_edit(void)                     /* Enter, or the mouse leaving: all the boxes; a box left empty keeps what it held (type 0 to clear a number) */
 {
     Position *p = cur_pos();
     int had = p->entry > 0 && p->size != 0;
     if (A.edit[0][0]) { double v = strtod(A.edit[0], NULL); p->entry = v > 0 ? v : 0; }
     if (A.edit[1][0]) p->size = strtod(A.edit[1], NULL);
+    if (A.edit[2][0]) { double v = strtod(A.edit[2], NULL); p->leverage = v > 0 ? v : 0; }
+    if (A.edit[3][0]) p->realized = strtod(A.edit[3], NULL);
     if (!(p->entry > 0 && p->size != 0)) { memset(p, 0, sizeof *p); }
     else if (!had || p->opened <= 0) { p->opened = (long long)time(NULL); p->have_range = 0; }      /* a new position starts now; correcting one keeps its time */
     save_pos(A.pair, p);
@@ -833,7 +861,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         return 0;
     case WM_KILLFOCUS: if (A.active && !A.dragging) { A.active = 0; A.editing = 0; set_passive(1); InvalidateRect(h, NULL, FALSE); } return 0;
     case WM_KEYDOWN:
-        if (A.editing) { if (w == VK_ESCAPE) { A.editing = 0; InvalidateRect(h, NULL, FALSE); } return 0; }
+        if (A.editing) {
+            if (w == VK_ESCAPE) A.editing = 0;
+            else if (w == VK_DOWN) { A.field = (A.field + 1) % 4; A.field_last = A.field; }
+            else if (w == VK_UP) { A.field = (A.field + 3) % 4; A.field_last = A.field; }
+            InvalidateRect(h, NULL, FALSE); return 0;
+        }
         switch (w) {
         case VK_UP: change_tf(1); break;
         case VK_DOWN: change_tf(-1); break;
@@ -847,7 +880,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (A.editing) {
             char *e = A.edit[A.field]; size_t n = strlen(e);
             if (w == '\r') { commit_edit(); return 0; }
-            else if (w == '\t') { A.field = 1 - A.field; }
+            else if (w == '\t') { A.field = (A.field + 1) % 4; A.field_last = A.field; }
             else if (w == '\b') { A.fresh[A.field] = 0; if (n) e[n - 1] = 0; }
             else if ((w >= '0' && w <= '9') || w == '.' || w == '-' || w == ',') {
                 if (A.fresh[A.field]) { e[0] = 0; n = 0; A.fresh[A.field] = 0; }      /* the first key replaces what the box held */
@@ -899,7 +932,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     GetPrivateProfileStringA("wincan", "pair", "BTC", A.pair, sizeof A.pair, A.ini);
     char tfs[8]; GetPrivateProfileStringA("wincan", "tf", "5m", tfs, sizeof tfs, A.ini);
     A.tf = 2; for (int i = 0; i < NTF; i++) if (!strcmp(tfs, TFS[i])) A.tf = i;
-    A.ind[0] = GetPrivateProfileIntA("wincan", "bollinger", 1, A.ini); A.ind[1] = GetPrivateProfileIntA("wincan", "ma9", 1, A.ini); A.ind[2] = GetPrivateProfileIntA("wincan", "ma200", 1, A.ini); A.hover = -1;
+    A.field_last = GetPrivateProfileIntA("wincan", "editfield", 0, A.ini); A.ind[0] = GetPrivateProfileIntA("wincan", "bollinger", 1, A.ini); A.ind[1] = GetPrivateProfileIntA("wincan", "ma9", 1, A.ini); A.ind[2] = GetPrivateProfileIntA("wincan", "ma200", 1, A.ini); A.hover = -1;
     A.scale = GetPrivateProfileIntA("wincan", "scale", 100, A.ini); if (A.scale < 75 || A.scale > 400) A.scale = 100;
     int server_given = 0, argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; i++) {
@@ -909,7 +942,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
         else if (!strcmp(a, "--pair") && i + 1 < argc) { snprintf(A.pair, sizeof A.pair, "%s", nx); i++; }
         else if (!strcmp(a, "--tf") && i + 1 < argc) { for (int k = 0; k < NTF; k++) if (!strcmp(nx, TFS[k])) A.tf = k; i++; }
         else if (!strcmp(a, "--shot") && i + 1 < argc) { static char shot[260]; snprintf(shot, sizeof shot, "%s", nx); A.shot = shot; i++; }
-        else if (!strcmp(a, "--shot-position") && i + 1 < argc) { sscanf(nx, "%lf,%lf", &A.shot_entry, &A.shot_size); i++; }
+        else if (!strcmp(a, "--shot-position") && i + 1 < argc) { sscanf(nx, "%lf,%lf,%lf,%lf", &A.shot_entry, &A.shot_size, &A.shot_lev, &A.shot_real); i++; }
         else if (!strcmp(a, "--shot-active")) A.shot_active = 1;
         else if (!strcmp(a, "--scale") && i + 1 < argc) { A.scale = atoi(nx); i++; }
         else if (!strcmp(a, "--test-close")) A.test_close = 1;
@@ -935,7 +968,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     RegisterClassA(&wc);
     RECT wa; SystemParametersInfo(SPI_GETWORKAREA, 0, &wa, 0);
     A.active = A.shot_active;
-    if (A.shot_editor) { A.editing = 1; A.field = 1; snprintf(A.edit[0], sizeof A.edit[0], "61000"); snprintf(A.edit[1], sizeof A.edit[1], "0.5"); }
+    if (A.shot_editor) { A.editing = 1; A.field = 2; snprintf(A.edit[0], sizeof A.edit[0], "61000"); snprintf(A.edit[1], sizeof A.edit[1], "0.5"); snprintf(A.edit[2], sizeof A.edit[2], "10"); snprintf(A.edit[3], sizeof A.edit[3], "-12.5"); }
     int W = win_w(), H = win_h();
     /* the first time, the top left corner of the screen; a saved place is kept only if the whole window is on a screen (all the monitors count) */
     int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN), vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);

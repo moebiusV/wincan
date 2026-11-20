@@ -22,13 +22,16 @@ the size of the window in percent (75 to 400, default 100 = 300 by 175 pixels).
 .B x, y
 the position of the window on the screen (the top left corner of the screen the first time, and whenever the saved place is not wholly on a screen).
 .TP
+.B editfield
+the box (0 to 3) that e opens the position editor on: the one last edited.
+.TP
 .B bollinger, ma9, ma200
 1 or 0: whether each indicator is drawn (default 1).
 .SS [positions]
 One line for each coin that has a position:
 .I NAME=ENTRY,SIZE
-with the entry price and the size in coins (negative for a short), for example
-.BR BTC=61000,0.5 .
+with the entry price, the size in coins (negative for a short), the time opened (Unix seconds), the leverage and the realized profit or loss in dollars, for example
+.BR BTC=61000,0.5,1795160000,10,15 .  The last three may be missing.
 .SH SEE ALSO
 .BR wincan (1),
 .BR candled (8)

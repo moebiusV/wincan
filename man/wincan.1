@@ -23,7 +23,7 @@ the timeframe: 1m 3m 5m 15m 30m 1h 4h 1d 1w.
 the coin, in the order the server lists them.
 .TP
 .B e
-open the position editor: two boxes, the entry price and the amount in coins (negative for a short).  Tab goes between the boxes, Enter, or moving the mouse out of the window, says the position has been entered (done); Esc cancels.  A box left empty keeps what it held; the first key typed in a box replaces its contents.
+open the position editor, a panel with four boxes: the entry price, the amount in coins (negative for a short), the leverage and the realized profit or loss in dollars (what has already been taken on the position).  It opens on the box last edited, and can be opened again at any time until the trade is closed with x.  Tab, or Up and Down, go between the boxes, Enter, or moving the mouse out of the window, says the position has been entered (done); Esc cancels.  A box left empty keeps what it held; the first key typed in a box replaces its contents.
 .TP
 .B Delete
 clear the position of this coin.
@@ -54,7 +54,7 @@ When a trade is closed with
 .BR x ,
 one line is appended to
 .B %APPDATA%\\wincan\\trades.csv
-(a header line is written first): the time closed, the coin, long or short, the entry and the size, the time opened, the exit price, the profit or loss in dollars and per cent, the highest and lowest price since entry with the time of each, the best and the worst the trade went through (the maximum favorable and maximum adverse excursion, in per cent and in dollars) and the duration in seconds.  The highest and lowest prices are asked of the server, so they are right even if the window was not running meanwhile.  While a position is open the window shows the best and worst so far.
+(a header line is written first): the time closed, the coin, long or short, the leverage, the entry and the size, the time opened, the exit price, the unrealized profit or loss, the realized one, their total, the margin (the value of the position divided by the leverage, or the whole value if none was given), the return on the margin in per cent, the highest and lowest price since entry with the time of each, the best and the worst the trade went through from the entry (the maximum favorable and maximum adverse excursion, in per cent of the margin and in dollars) and the duration in seconds.  The highest and lowest prices are asked of the server, so they are right even if the window was not running meanwhile.  While a position is open the window shows the best and worst so far.
 .SH ONE COPY
 Only one copy runs: starting a second finds the first, shows its window (it may be hidden in the tray) and exits.
 .SH OPTIONS
