@@ -29,7 +29,8 @@
 #define IDM_EXIT    101
 #define MAX_BARS    500
 #define MAX_PAIRS   256
-#define BASE        200
+#define BASE_W      300
+#define BASE_H      175
 
 static const char *TFS[] = { "1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w" };
 #define NTF 9
@@ -231,7 +232,7 @@ static DWORD WINAPI worker(LPVOID arg)
         char pair[24]; int tf, bars;
         EnterCriticalSection(&A.cs);
         snprintf(pair, sizeof pair, "%s", A.pair); tf = A.tf;
-        bars = (BASE * A.scale / 100 - 8) / 4; if (bars > MAX_BARS) bars = MAX_BARS; if (bars < 10) bars = 10;
+        bars = (BASE_W * A.scale / 100 - 8) / 4; if (bars > MAX_BARS) bars = MAX_BARS; if (bars < 10) bars = 10;
         LeaveCriticalSection(&A.cs);
         char path[160]; snprintf(path, sizeof path, "/candles?pair=%s&tf=%s&n=%d", pair, TFS[tf], bars);
         char *b = http_get(path);
@@ -309,11 +310,11 @@ static void rect(HDC dc, int x0, int y0, int x1, int y1, COLORREF c)
 #define COL_DIM   RGB(120, 130, 140)
 #define COL_ENTRY RGB(240, 200, 60)
 
-static void paint(HDC dc, int S)
+static void paint(HDC dc, int W, int H)
 {
-    double u = S / (double)BASE;                           /* scale factor */
+    double u = W / (double)BASE_W;                         /* scale factor */
     #define U(v) ((int)((v) * u + 0.5))
-    rect(dc, 0, 0, S, S, COL_BG);
+    rect(dc, 0, 0, W, H, COL_BG);
     HFONT fb = font(U(13), 1), fn = font(U(11), 0), fs = font(U(9), 0), fp = font(U(15), 1);
 
     EnterCriticalSection(&A.cs);
@@ -330,10 +331,10 @@ static void paint(HDC dc, int S)
     /* header */
     snprintf(buf, sizeof buf, "%s  %s", pair, TFS[tf]);
     text(dc, fb, COL_TXT, U(6), U(2), buf, 0);
-    if (n > 0) { fmt_price(price, buf, sizeof buf); text(dc, fp, COL_TXT, S - U(6), U(1), buf, 1); }
-    int top = U(22), bot = S - U(40);
+    if (n > 0) { fmt_price(price, buf, sizeof buf); text(dc, fp, COL_TXT, W - U(6), U(1), buf, 1); }
+    int top = U(22), bot = H - U(40);
     if (!have || n == 0) {
-        text(dc, fn, failed ? COL_DOWN : COL_DIM, S / 2, S / 2 - U(8), failed ? "no data from the server" : "loading...", 2);
+        text(dc, fn, failed ? COL_DOWN : COL_DIM, W / 2, H / 2 - U(8), failed ? "no data from the server" : "loading...", 2);
     } else {
         /* the chart */
         double hi = h[0], lo = l[0];
@@ -345,7 +346,7 @@ static void paint(HDC dc, int S)
             range = hi - lo;
         }
         double pad = range * 0.04; hi += pad; lo -= pad; range = hi - lo;
-        int cw = S - U(8), ch = bot - top;
+        int cw = W - U(8), ch = bot - top;
         #define Y(p) (top + (int)((hi - (p)) / range * ch + 0.5))
         int step = n > 0 ? cw / n : 4; if (step < 2) step = 2;
         int bw = step >= 4 ? step - 1 : step - 1 > 0 ? step - 1 : 1; if (bw > step - 1 && step > 1) bw = step - 1;
@@ -360,18 +361,18 @@ static void paint(HDC dc, int S)
         if (pos.entry > 0 && pos.size != 0) {
             int y = Y(pos.entry);
             HPEN pen = CreatePen(PS_DOT, 1, COL_ENTRY); HGDIOBJ old = SelectObject(dc, pen);
-            SetBkMode(dc, TRANSPARENT); MoveToEx(dc, U(4), y, NULL); LineTo(dc, S - U(4), y); SelectObject(dc, old); DeleteObject(pen);
+            SetBkMode(dc, TRANSPARENT); MoveToEx(dc, U(4), y, NULL); LineTo(dc, W - U(4), y); SelectObject(dc, old); DeleteObject(pen);
         }
         double mx = c[n - 1]; int ypl = Y(mx);
-        { HPEN pen = CreatePen(PS_SOLID, 1, RGB(70, 80, 92)); HGDIOBJ old = SelectObject(dc, pen); MoveToEx(dc, U(4), ypl, NULL); LineTo(dc, S - U(4), ypl); SelectObject(dc, old); DeleteObject(pen); }
+        { HPEN pen = CreatePen(PS_SOLID, 1, RGB(70, 80, 92)); HGDIOBJ old = SelectObject(dc, pen); MoveToEx(dc, U(4), ypl, NULL); LineTo(dc, W - U(4), ypl); SelectObject(dc, old); DeleteObject(pen); }
         fmt_price(hi - pad, buf, sizeof buf); text(dc, fs, COL_DIM, U(5), top - U(1), buf, 0);
         fmt_price(lo + pad, buf, sizeof buf); text(dc, fs, COL_DIM, U(5), bot - U(11), buf, 0);
-        if (age > 20000) { snprintf(buf, sizeof buf, "%d s old", (int)(age / 1000)); text(dc, fs, COL_ENTRY, S - U(5), top - U(1), buf, 1); }
-        else if (!complete) text(dc, fs, COL_DIM, S - U(5), top - U(1), "history loading", 1);
+        if (age > 20000) { snprintf(buf, sizeof buf, "%d s old", (int)(age / 1000)); text(dc, fs, COL_ENTRY, W - U(5), top - U(1), buf, 1); }
+        else if (!complete) text(dc, fs, COL_DIM, W - U(5), top - U(1), "history loading", 1);
     }
 
     /* the footer: profit and loss */
-    int fy = S - U(38);
+    int fy = H - U(38);
     if (A.editing) {
         snprintf(buf, sizeof buf, "%s> %s_", A.editing == 'e' ? "entry price" : "size (coins, - short)", A.edit);
         text(dc, fn, COL_ENTRY, U(6), fy + U(4), buf, 0);
@@ -382,39 +383,40 @@ static void paint(HDC dc, int S)
         COLORREF col = usd > 0 ? COL_UP : usd < 0 ? COL_DOWN : COL_TXT;
         snprintf(buf, sizeof buf, "%+.2f%%", pct); fmt_money(usd, buf2, sizeof buf2);
         text(dc, fp, col, U(6), fy, buf, 0);
-        text(dc, fp, col, S - U(6), fy, buf2, 1);
-        if (A.active) text(dc, fs, COL_DIM, U(6), fy + U(22), "up/down time  left/right coin  e s  del  x quit", 0);
+        text(dc, fp, col, W - U(6), fy, buf2, 1);
+        if (A.active) text(dc, fs, COL_DIM, U(6), fy + U(22), "up/down time   left/right coin   e entry   s size   del   x q quit", 0);
         else { fmt_price(pos.entry, buf, sizeof buf); snprintf(buf2, sizeof buf2, "%.6g @ %s", pos.size, buf); text(dc, fs, COL_DIM, U(6), fy + U(22), buf2, 0); }
     } else {
         text(dc, fn, COL_DIM, U(6), fy + U(4), "no position", 0);
-        text(dc, fs, COL_DIM, U(6), fy + U(22), A.active ? "e entry price   s size   x quit" : "click, then e / s to enter a position", 0);
+        text(dc, fs, COL_DIM, U(6), fy + U(22), A.active ? "e entry price   s size   x or q quit" : "click, then e / s to enter a position", 0);
     }
     if (A.active) {                                              /* the window has the keyboard */
         HPEN pen = CreatePen(PS_SOLID, 1, RGB(70, 130, 200)); HGDIOBJ oldp = SelectObject(dc, pen), oldb = SelectObject(dc, GetStockObject(NULL_BRUSH));
-        Rectangle(dc, 0, 0, S, S); SelectObject(dc, oldp); SelectObject(dc, oldb); DeleteObject(pen);
+        Rectangle(dc, 0, 0, W, H); SelectObject(dc, oldp); SelectObject(dc, oldb); DeleteObject(pen);
     }
     DeleteObject(fb); DeleteObject(fn); DeleteObject(fs); DeleteObject(fp);
     #undef U
     #undef Y
 }
 
-static int win_size(void) { return BASE * A.scale / 100; }
+static int win_w(void) { return BASE_W * A.scale / 100; }
+static int win_h(void) { return BASE_H * A.scale / 100; }
 
-static int save_bmp(const char *file, int S)
+static int save_bmp(const char *file, int W, int H)
 {
     HDC sc = GetDC(NULL), dc = CreateCompatibleDC(sc);
     BITMAPINFO bi; memset(&bi, 0, sizeof bi);
-    bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = S; bi.bmiHeader.biHeight = -S; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
     void *bits; HBITMAP bm = CreateDIBSection(sc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
     HGDIOBJ old = SelectObject(dc, bm);
-    paint(dc, S);
-    BITMAPFILEHEADER fh = { 0x4D42, (DWORD)(sizeof fh + sizeof bi.bmiHeader + (size_t)S * S * 4), 0, 0, (DWORD)(sizeof fh + sizeof bi.bmiHeader) };
+    paint(dc, W, H);
+    BITMAPFILEHEADER fh = { 0x4D42, (DWORD)(sizeof fh + sizeof bi.bmiHeader + (size_t)W * H * 4), 0, 0, (DWORD)(sizeof fh + sizeof bi.bmiHeader) };
     FILE *f = fopen(file, "wb");
     int ok = f != NULL;
     if (f) {
-        BITMAPINFOHEADER h = bi.bmiHeader; h.biHeight = S;                   /* bottom-up for the file */
+        BITMAPINFOHEADER h = bi.bmiHeader; h.biHeight = H;                   /* bottom-up for the file */
         fwrite(&fh, sizeof fh, 1, f); fwrite(&h, sizeof h, 1, f);
-        for (int y = S - 1; y >= 0; y--) fwrite((char *)bits + (size_t)y * S * 4, 4, (size_t)S, f);
+        for (int y = H - 1; y >= 0; y--) fwrite((char *)bits + (size_t)y * W * 4, 4, (size_t)W, f);
         fclose(f);
     }
     SelectObject(dc, old); DeleteObject(bm); DeleteDC(dc); ReleaseDC(NULL, sc);
@@ -425,8 +427,7 @@ static int save_bmp(const char *file, int S)
 
 static void resize_window(void)
 {
-    int S = win_size();
-    SetWindowPos(A.hwnd, HWND_TOPMOST, 0, 0, S, S, SWP_NOMOVE | SWP_NOACTIVATE);
+    SetWindowPos(A.hwnd, HWND_TOPMOST, 0, 0, win_w(), win_h(), SWP_NOMOVE | SWP_NOACTIVATE);
     InvalidateRect(A.hwnd, NULL, FALSE);
 }
 
@@ -545,10 +546,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     switch (m) {
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
-        int S = win_size();
-        HDC mem = CreateCompatibleDC(dc); HBITMAP bm = CreateCompatibleBitmap(dc, S, S); HGDIOBJ old = SelectObject(mem, bm);
-        paint(mem, S);
-        BitBlt(dc, 0, 0, S, S, mem, 0, 0, SRCCOPY);
+        int W = win_w(), H = win_h();
+        HDC mem = CreateCompatibleDC(dc); HBITMAP bm = CreateCompatibleBitmap(dc, W, H); HGDIOBJ old = SelectObject(mem, bm);
+        paint(mem, W, H);
+        BitBlt(dc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old); DeleteObject(bm); DeleteDC(mem);
         EndPaint(h, &ps);
         return 0; }
@@ -557,7 +558,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         InvalidateRect(h, NULL, FALSE);
         if (A.shot && !A.shot_done) {
             EnterCriticalSection(&A.cs); int ready = A.have && A.complete; LeaveCriticalSection(&A.cs);
-            static int tries; if (ready || ++tries > 12) { A.shot_done = 1; save_bmp(A.shot, win_size()); quit_app(); }
+            static int tries; if (ready || ++tries > 12) { A.shot_done = 1; save_bmp(A.shot, win_w(), win_h()); quit_app(); }
         }
         return 0;
     case WM_MOUSEACTIVATE: return A.active ? MA_ACTIVATE : MA_NOACTIVATE;
@@ -605,7 +606,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             return 0;
         }
         switch (w) {
-        case 'x': case 'X': quit_app(); break;
+        case 'x': case 'X': case 'q': case 'Q': quit_app(); break;
         case 'e': case 'E': A.editing = 'e'; A.edit[0] = 0; InvalidateRect(h, NULL, FALSE); break;
         case 's': case 'S': A.editing = 's'; A.edit[0] = 0; InvalidateRect(h, NULL, FALSE); break;
         case 't': case 'T': show_hide(0); break;
@@ -668,10 +669,10 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     RegisterClassA(&wc);
     RECT wa; SystemParametersInfo(SPI_GETWORKAREA, 0, &wa, 0);
     A.active = A.shot_active;
-    int S = win_size();
-    int x = GetPrivateProfileIntA("candlewin", "x", wa.right - S - 20, A.ini), y = GetPrivateProfileIntA("candlewin", "y", wa.top + 20, A.ini);
-    if (x < wa.left - S + 40 || x > wa.right - 40 || y < wa.top - 10 || y > wa.bottom - 40) { x = wa.right - S - 20; y = wa.top + 20; }       /* off every screen: bring it back */
-    A.hwnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_APPWINDOW | WS_EX_NOACTIVATE, "candlewin", "candlewin", WS_POPUP, x, y, S, S, NULL, NULL, hi, NULL);
+    int W = win_w(), H = win_h();
+    int x = GetPrivateProfileIntA("candlewin", "x", wa.right - W - 20, A.ini), y = GetPrivateProfileIntA("candlewin", "y", wa.top + 20, A.ini);
+    if (x < wa.left - W + 40 || x > wa.right - 40 || y < wa.top - 10 || y > wa.bottom - 40) { x = wa.right - W - 20; y = wa.top + 20; }       /* off every screen: bring it back */
+    A.hwnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_APPWINDOW | WS_EX_NOACTIVATE, "candlewin", "candlewin", WS_POPUP, x, y, W, H, NULL, NULL, hi, NULL);
     if (!A.hwnd) return 1;
     tray_add();
     RegisterHotKey(A.hwnd, ID_HOTKEY, MOD_CONTROL | MOD_ALT, 'C');
