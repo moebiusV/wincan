@@ -37,6 +37,13 @@ typedef struct {
     float           price;            /* the last close */
     pthread_mutex_t mu;               /* the bars */
     pthread_mutex_t rmu;              /* one refresh at a time */
+    /* a series can instead be read from a SQLite table of 1-minute candles (candles_kucoin_futures of a database) */
+    int             is_db;
+    char            dbpath[512], dbpair[32];
+    void           *db;               /* sqlite3 * */
+    int64_t         db_min_ts, db_last_ts, db_lo_ts;       /* seconds: the oldest row of the pair, the newest loaded, the oldest loaded */
+    int64_t         last_check_ms;
+    int64_t         partial_min;      /* the first minute of a file that began mid-minute: used only if no other source has that minute */
 } Series;
 
 typedef struct {
@@ -59,6 +66,11 @@ void series_query(Series *s, int tf_minutes, int n, int64_t now_ms, Out *out);
 /* the highest high and lowest low of the minutes from since_sec to now, and the minute (seconds) of each; n is the number of minutes with data */
 typedef struct { double high, low; int64_t high_t, low_t; int n; float price; } Range;
 void series_range2(Series *primary, Series *backfill, int64_t since_sec, Range *r);
+/* the same from any number of series, in order of priority */
+void series_queryN(Series **list, int count, int tf_minutes, int n, int64_t now_ms, Out *out);
+void series_rangeN(Series **list, int count, int64_t since_sec, Range *r);
+/* a series of 1-minute candles read from a SQLite database (table candles_kucoin_futures: pair, ts, open, high, low, close, volume), read-only; 0 on success */
+int  series_open_db(Series *s, const char *dbpath, const char *dbpair, int cap);
 void series_query2(Series *primary, Series *backfill, int tf_minutes, int n, int64_t now_ms, Out *out);
 int  tf_minutes(const char *name);                               /* "5m" -> 5; 0 when not one of the nine */
 

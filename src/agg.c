@@ -8,6 +8,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <time.h>
+#include <sqlite3.h>
 
 typedef struct { float O, H, L, C, V, J; uint32_t N; } Rec;
 
@@ -32,7 +34,7 @@ int series_open(Series *s, const char *path, int cap)
     return 0;
 }
 
-void series_close(Series *s) { free(s->bars); s->bars = NULL; pthread_mutex_destroy(&s->mu); }
+void series_close(Series *s) { if (s->db) sqlite3_close((sqlite3 *)s->db); s->db = NULL; free(s->bars); s->bars = NULL; pthread_mutex_destroy(&s->mu); pthread_mutex_destroy(&s->rmu); }
 
 /* put one finished minute (a local run of records) into the slot, before or after what is there */
 static void merge(Series *s, int64_t minute, const Bar *b, int before)
@@ -197,6 +199,122 @@ static float last_close(int fd, int64_t size)
     return 0;
 }
 
+/* ---- a series from a SQLite table of 1-minute candles ---- */
+
+static Bar *slot_for(Series *s, int64_t minute)
+{
+    int64_t i = minute - s->base_min;
+    if (i < 0) return NULL;
+    if (i >= s->cap) {
+        int64_t sh = i - s->cap + 1 + 1024;
+        if (sh >= s->cap) memset(s->bars, 0, (size_t)s->cap * sizeof(Bar));
+        else { memmove(s->bars, s->bars + sh, (size_t)(s->cap - sh) * sizeof(Bar)); memset(s->bars + (s->cap - sh), 0, (size_t)sh * sizeof(Bar)); }
+        s->base_min += sh; i -= sh;
+    }
+    return &s->bars[i];
+}
+
+int series_open_db(Series *s, const char *dbpath, const char *dbpair, int cap)
+{
+    if (series_open(s, dbpath, cap) != 0) return -1;
+    s->is_db = 1;
+    snprintf(s->dbpath, sizeof s->dbpath, "%s", dbpath);
+    snprintf(s->dbpair, sizeof s->dbpair, "%s", dbpair);
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(dbpath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) { if (db) sqlite3_close(db); series_close(s); return -1; }
+    sqlite3_busy_timeout(db, 5000);
+    s->db = db;
+    return 0;
+}
+
+/* the rows with ts in [lo, hi) of the pair, into the bars (a bar already there is replaced); returns the number of rows, or -1; *last_ts and *last_close describe the newest */
+static int db_load(Series *s, int64_t lo, int64_t hi, int64_t *last_ts, float *last_close_out)
+{
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2((sqlite3 *)s->db, "SELECT ts, open, high, low, close, volume FROM candles_kucoin_futures WHERE pair=?1 AND ts>=?2 AND ts<?3 ORDER BY ts", -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, s->dbpair, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 2, lo); sqlite3_bind_int64(st, 3, hi);
+    enum { CH = 20000 };
+    typedef struct { int64_t m; Bar b; } Row;
+    Row *rows = malloc(CH * sizeof(Row));
+    if (!rows) { sqlite3_finalize(st); return -1; }
+    int total = 0, n = 0, rc;
+    for (;;) {
+        rc = sqlite3_step(st);
+        if (rc == SQLITE_ROW) {
+            double o = sqlite3_column_double(st, 1), h = sqlite3_column_double(st, 2), l = sqlite3_column_double(st, 3), c = sqlite3_column_double(st, 4), v = sqlite3_column_double(st, 5);
+            double mx = o > c ? o : c, mn = o < c ? o : c;
+            if (o > 0 && h > 0 && l > 0 && c > 0 && h >= mx * 0.9999 && l <= mn * 1.0001 && h <= mx * 3 && l >= mn / 3) {          /* believable */
+                int64_t ts = sqlite3_column_int64(st, 0);
+                Row *r = &rows[n++];
+                r->m = floor_div(ts, 60); r->b.o = (float)o; r->b.h = (float)h; r->b.l = (float)l; r->b.c = (float)c; r->b.v = (v >= 0 && v < 1e13) ? (float)v : 0; r->b.has = 1;
+                total++;
+                if (last_ts && ts >= *last_ts) { *last_ts = ts; if (last_close_out) *last_close_out = (float)c; }
+            }
+        }
+        if ((rc != SQLITE_ROW && n > 0) || n == CH) {
+            pthread_mutex_lock(&s->mu);
+            for (int i = 0; i < n; i++) { Bar *d = slot_for(s, rows[i].m); if (d) *d = rows[i].b; }
+            pthread_mutex_unlock(&s->mu);
+            n = 0;
+        }
+        if (rc != SQLITE_ROW) break;
+    }
+    free(rows);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? total : -1;
+}
+
+static int db_tail(Series *s)
+{
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2((sqlite3 *)s->db, "SELECT MAX(ts), MIN(ts) FROM candles_kucoin_futures WHERE pair=?1", -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, s->dbpair, -1, SQLITE_STATIC);
+    int64_t last = 0, first = 0; int ok = 0;
+    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_type(st, 0) != SQLITE_NULL) { last = sqlite3_column_int64(st, 0); first = sqlite3_column_int64(st, 1); ok = 1; }
+    sqlite3_finalize(st);
+    if (!ok) return -1;
+    pthread_mutex_lock(&s->mu);
+    memset(s->bars, 0, (size_t)s->cap * sizeof(Bar));
+    s->base_min = floor_div(last, 60) - (s->cap - 1024);
+    s->db_min_ts = first; s->db_last_ts = last;
+    pthread_mutex_unlock(&s->mu);
+    int64_t lo = last - 3 * 86400; if (lo < first) lo = first;
+    int64_t lt = 0; float lc = 0;
+    int n = db_load(s, lo, last + 1, &lt, &lc);
+    if (n <= 0) return -1;
+    s->db_lo_ts = lo; s->history_done = lo <= first;
+    s->first_ms = lo * 1000; s->next_ms = (last + 60) * 1000; s->price = lc;
+    return 0;
+}
+
+static int db_history(Series *s)
+{
+    if (s->history_done) return 0;
+    int64_t hi = s->db_lo_ts, lo = hi - 30 * 86400, floor_ts = s->base_min * 60;
+    if (lo < s->db_min_ts) lo = s->db_min_ts;
+    if (lo < floor_ts) lo = floor_ts;
+    int rc = db_load(s, lo, hi, NULL, NULL);
+    pthread_mutex_lock(&s->mu);
+    s->db_lo_ts = lo;
+    if (rc < 0 || lo <= s->db_min_ts || lo <= floor_ts) s->history_done = 1;
+    int more = !s->history_done;
+    pthread_mutex_unlock(&s->mu);
+    return more;
+}
+
+static int db_refresh(Series *s)
+{
+    struct timespec t; clock_gettime(CLOCK_REALTIME, &t);
+    int64_t now = (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+    if (now - s->last_check_ms < 5000) return 0;                       /* a database is asked at most every five seconds */
+    s->last_check_ms = now;
+    int64_t lt = s->db_last_ts; float lc = s->price;
+    int n = db_load(s, s->db_last_ts, INT64_MAX, &lt, &lc);            /* from the newest row we have: it may have been rewritten */
+    if (n > 0) { pthread_mutex_lock(&s->mu); s->db_last_ts = lt; s->next_ms = (lt + 60) * 1000; s->price = lc; pthread_mutex_unlock(&s->mu); }
+    return n < 0 ? -1 : 0;
+}
+
 int series_valid(const char *path)
 {
     struct stat st;
@@ -213,6 +331,7 @@ int series_valid(const char *path)
 
 int series_tail(Series *s, int64_t recent)
 {
+    if (s->is_db) return db_tail(s);
     int64_t size, mt;
     if (stat_file(s, &size, &mt) < 0 || size < 4 * REC_SIZE) return -1;
     int fd = open(s->path, O_RDONLY);
@@ -232,6 +351,7 @@ int series_tail(Series *s, int64_t recent)
     memset(s->bars, 0, (size_t)s->cap * sizeof(Bar));
     s->base_min = floor_div(mt, 60000) - (s->cap - 1024);
     s->first_pos = first_pos; s->first_ms = t_first; s->history_done = (first_pos < REC_SIZE);
+    s->partial_min = (s->history_done && t_first % 60000 != 0) ? floor_div(t_first, 60000) : 0;
     pthread_mutex_unlock(&s->mu);
     int64_t t = t_first, edge = first_pos;
     int rc = read_fold(s, fd, size, first_pos, size, &t, 0, 1, &edge);
@@ -243,6 +363,7 @@ int series_tail(Series *s, int64_t recent)
 
 int series_history(Series *s, int64_t nbytes)
 {
+    if (s->is_db) return db_history(s);
     if (s->history_done) return 0;
     int fd = open(s->path, O_RDONLY);
     if (fd < 0) return 0;
@@ -254,6 +375,7 @@ int series_history(Series *s, int64_t nbytes)
     close(fd);
     pthread_mutex_lock(&s->mu);
     s->first_pos = edge; s->first_ms = t;
+    if (rc >= 0 && lo == 0 && t % 60000 != 0) s->partial_min = floor_div(t, 60000);
     if (rc < 0 || lo == 0 || floor_div(t, 60000) < s->base_min) s->history_done = 1;
     int more = !s->history_done;
     pthread_mutex_unlock(&s->mu);
@@ -271,6 +393,7 @@ int series_refresh(Series *s)
 
 static int refresh_locked(Series *s)
 {
+    if (s->is_db) return db_refresh(s);
     int64_t size, mt;
     if (stat_file(s, &size, &mt) < 0) return -1;
     if (size == s->pos) return 0;
@@ -303,73 +426,92 @@ static int64_t last_minute(const Series *s)
     return INT64_MIN;
 }
 
-void series_query2(Series *p, Series *b2, int tf, int n, int64_t now_ms, Out *out)
+/* the minute from the first series that has it; the first minute of a file that began mid-minute only if nothing else has that minute */
+static const Bar *pick(Series **l, int n, int64_t m)
+{
+    const Bar *partial = NULL;
+    for (int i = 0; i < n; i++) {
+        const Bar *b = bar_at(l[i], m);
+        if (!b) continue;
+        if (l[i]->partial_min == m) { if (!partial) partial = b; continue; }
+        return b;
+    }
+    return partial;
+}
+
+static void lock_all(Series **l, int n) { for (int i = 0; i < n; i++) if (l[i]) pthread_mutex_lock(&l[i]->mu); }
+static void unlock_all(Series **l, int n) { for (int i = n - 1; i >= 0; i--) if (l[i]) pthread_mutex_unlock(&l[i]->mu); }
+
+void series_queryN(Series **l, int cnt, int tf, int n, int64_t now_ms, Out *out)
 {
     memset(out, 0, sizeof *out);
     if (n > MAX_BARS) n = MAX_BARS;
     if (n < 1) n = 1;
-    if (p) pthread_mutex_lock(&p->mu);
-    if (b2) pthread_mutex_lock(&b2->mu);
-    int64_t lp = last_minute(p), ls = last_minute(b2);
-    const Series *lead = (p && lp != INT64_MIN) ? p : b2;               /* the price and the age come from the primary once it has data */
+    lock_all(l, cnt);
+    int64_t lastmin = INT64_MIN, oldest = INT64_MAX; const Series *lead = NULL; int complete = 1;
+    for (int i = 0; i < cnt; i++) {
+        if (!l[i]) continue;
+        int64_t lm = last_minute(l[i]);
+        if (lm > lastmin) lastmin = lm;
+        if (!lead && lm != INT64_MIN) lead = l[i];                        /* the price and the age come from the first with data */
+        if (l[i]->base_min < oldest) oldest = l[i]->base_min;
+        if (!l[i]->history_done) complete = 0;
+    }
     if (lead) { out->price = lead->price; out->age_ms = now_ms - lead->next_ms; }
-    out->complete = (!p || p->history_done) && (!b2 || b2->history_done);
-    int64_t lastmin = lp > ls ? lp : ls;
-    int64_t oldest = INT64_MAX;
-    if (p && p->base_min < oldest) oldest = p->base_min;
-    if (b2 && b2->base_min < oldest) oldest = b2->base_min;
+    out->complete = complete;
     if (lastmin != INT64_MIN) {
         int64_t step = tf, off = (tf == 10080) ? 5760 : 0;                   /* weeks begin on Monday: 1970-01-05 */
         int64_t key = floor_div(lastmin - off, step) * step + off;
-        static __thread Out tmp; int cnt = 0;
-        for (; cnt < n; key -= step) {
-            float o = 0, h = 0, l = 0, c = 0, v = 0; int got = 0;
+        static __thread Out tmp; int c2 = 0;
+        for (; c2 < n; key -= step) {
+            float o = 0, h = 0, lo2 = 0, c = 0, v = 0; int got = 0;
             if (key + step - 1 < oldest) break;                              /* past the oldest bar */
             for (int64_t m = key; m < key + step; m++) {
-                const Bar *bb = bar_at(p, m);
-                if (!bb) bb = bar_at(b2, m);
+                const Bar *bb = pick(l, cnt, m);
                 if (!bb) continue;
-                if (!got) { o = bb->o; h = bb->h; l = bb->l; got = 1; } else { if (bb->h > h) h = bb->h; if (bb->l < l) l = bb->l; }
+                if (!got) { o = bb->o; h = bb->h; lo2 = bb->l; got = 1; } else { if (bb->h > h) h = bb->h; if (bb->l < lo2) lo2 = bb->l; }
                 c = bb->c; v += bb->v;
             }
             if (!got) continue;                                              /* a gap: no bar */
-            tmp.t[cnt] = key * 60; tmp.o[cnt] = o; tmp.h[cnt] = h; tmp.l[cnt] = l; tmp.c[cnt] = c; tmp.v[cnt] = v; cnt++;
+            tmp.t[c2] = key * 60; tmp.o[c2] = o; tmp.h[c2] = h; tmp.l[c2] = lo2; tmp.c[c2] = c; tmp.v[c2] = v; c2++;
         }
-        out->n = cnt;
-        for (int i = 0; i < cnt; i++) {                                      /* oldest first */
-            int j = cnt - 1 - i;
+        out->n = c2;
+        for (int i = 0; i < c2; i++) {                                       /* oldest first */
+            int j = c2 - 1 - i;
             out->t[i] = tmp.t[j]; out->o[i] = tmp.o[j]; out->h[i] = tmp.h[j]; out->l[i] = tmp.l[j]; out->c[i] = tmp.c[j]; out->v[i] = tmp.v[j];
         }
     }
-    if (b2) pthread_mutex_unlock(&b2->mu);
-    if (p) pthread_mutex_unlock(&p->mu);
+    unlock_all(l, cnt);
 }
 
-void series_range2(Series *p, Series *b2, int64_t since_sec, Range *r)
+void series_rangeN(Series **l, int cnt, int64_t since_sec, Range *r)
 {
     memset(r, 0, sizeof *r);
-    if (p) pthread_mutex_lock(&p->mu);
-    if (b2) pthread_mutex_lock(&b2->mu);
-    int64_t lp = last_minute(p), ls = last_minute(b2), last = lp > ls ? lp : ls;
-    const Series *lead = (p && lp != INT64_MIN) ? p : b2;
+    lock_all(l, cnt);
+    int64_t last = INT64_MIN, oldest = INT64_MAX; const Series *lead = NULL;
+    for (int i = 0; i < cnt; i++) {
+        if (!l[i]) continue;
+        int64_t lm = last_minute(l[i]);
+        if (lm > last) last = lm;
+        if (!lead && lm != INT64_MIN) lead = l[i];
+        if (l[i]->base_min < oldest) oldest = l[i]->base_min;
+    }
     if (lead) r->price = lead->price;
     if (last != INT64_MIN) {
         int64_t first = floor_div(since_sec, 60);
-        int64_t oldest = INT64_MAX;
-        if (p && p->base_min < oldest) oldest = p->base_min;
-        if (b2 && b2->base_min < oldest) oldest = b2->base_min;
         if (first < oldest) first = oldest;
         for (int64_t m = first; m <= last; m++) {
-            const Bar *bb = bar_at(p, m);
-            if (!bb) bb = bar_at(b2, m);
+            const Bar *bb = pick(l, cnt, m);
             if (!bb) continue;
             if (r->n == 0 || bb->h > r->high) { r->high = bb->h; r->high_t = m * 60; }
             if (r->n == 0 || bb->l < r->low)  { r->low = bb->l;  r->low_t = m * 60; }
             r->n++;
         }
     }
-    if (b2) pthread_mutex_unlock(&b2->mu);
-    if (p) pthread_mutex_unlock(&p->mu);
+    unlock_all(l, cnt);
 }
+
+void series_query2(Series *p, Series *b2, int tf, int n, int64_t now_ms, Out *out) { Series *l[2] = { p, b2 }; series_queryN(l, 2, tf, n, now_ms, out); }
+void series_range2(Series *p, Series *b2, int64_t since_sec, Range *r) { Series *l[2] = { p, b2 }; series_rangeN(l, 2, since_sec, r); }
 
 void series_query(Series *s, int tf, int n, int64_t now_ms, Out *out) { series_query2(s, NULL, tf, n, now_ms, out); }

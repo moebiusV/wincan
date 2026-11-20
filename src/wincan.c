@@ -505,7 +505,7 @@ static void paint(HDC dc, int W, int H)
         int cw = W - U(8) - rpad, ch = bot - top;
         #define Y(p) (top + (int)((hi - (p)) / range * ch + 0.5))
         int step = dn > 0 ? cw / dn : 4; if (step < 2) step = 2;
-        int bw = step >= 4 ? step - 1 : step - 1 > 0 ? step - 1 : 1; if (bw > step - 1 && step > 1) bw = step - 1;
+        int bw = step - 1; if (bw % 2 == 0) bw--; if (bw < 1) bw = 1;       /* a body of an odd width has a middle pixel for the wick */
         int x0 = U(4) + (cw - step * dn);                        /* the newest bar at the right */
         HRGN clip = CreateRectRgn(0, top, W, bot); SelectClipRgn(dc, clip);          /* the lines stay in the chart */
         #define LINE(arr, okarr, col, style) do { HPEN pn = CreatePen(style, 1, col); HGDIOBJ op = SelectObject(dc, pn); int started = 0; \
@@ -519,9 +519,9 @@ static void paint(HDC dc, int W, int H)
         for (int i = base; i < n; i++) {
             int cur = i == n - 1;                                   /* the candle still forming: brighter and thicker */
             COLORREF col = c[i] >= o[i] ? (cur ? RGB(90, 235, 140) : COL_UP) : (cur ? RGB(255, 120, 120) : COL_DOWN);
-            int x = x0 + (i - base) * step + (cur ? 1 : 0), cx = x + bw / 2, w = cur ? bw + 2 : bw, wk = cur ? 2 : 1;
-            if (cur) x -= 1;
-            rect(dc, cx, Y(h[i]), cx + wk, Y(l[i]) + 1, col);
+            int xs = x0 + (i - base) * step, cx = xs + bw / 2;                        /* the middle pixel of the slot's body */
+            int x = cur ? xs - 1 : xs, w = cur ? bw + 2 : bw;                         /* the forming candle is two pixels wider, still centred on the wick */
+            rect(dc, cx, Y(h[i]), cx + 1, Y(l[i]) + 1, col);
             int yo = Y(o[i]), yc = Y(c[i]); if (yo > yc) { int tmp = yo; yo = yc; yc = tmp; }
             rect(dc, x, yo, x + w, yc + 1 > yo + 1 ? yc + 1 : yo + 1, col);
         }
@@ -911,6 +911,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
         else if (!strcmp(a, "--shot") && i + 1 < argc) { static char shot[260]; snprintf(shot, sizeof shot, "%s", nx); A.shot = shot; i++; }
         else if (!strcmp(a, "--shot-position") && i + 1 < argc) { sscanf(nx, "%lf,%lf", &A.shot_entry, &A.shot_size); i++; }
         else if (!strcmp(a, "--shot-active")) A.shot_active = 1;
+        else if (!strcmp(a, "--scale") && i + 1 < argc) { A.scale = atoi(nx); i++; }
         else if (!strcmp(a, "--test-close")) A.test_close = 1;
         else if (!strcmp(a, "--shot-editor")) A.shot_editor = 1;
         else if (!strcmp(a, "--shot-hover") && i + 1 < argc) { A.hover = atoi(nx); i++; }
