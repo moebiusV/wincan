@@ -1,3 +1,4 @@
 2026-11-20  Initial version.
 2026-11-20  Keep-alive connections; the window caches what it fetched and resolves the server once; /pairs omits stale files.
 2026-11-20  The window is 300x175; q quits as well as x.
+2026-11-20  Indicators with toggle dots; candled --backfill; the window starts at the top left and is kept on screen.

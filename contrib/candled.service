@@ -5,7 +5,7 @@
 Description=candled: candles from the collector's files, as JSON
 
 [Service]
-ExecStart=%h/.local/sbin/candled --dir %h/path/to/candles --port 8766
+ExecStart=%h/.local/sbin/candled --dir %h/path/to/primary/candles --backfill %h/path/to/spot/candles --port 8766
 Restart=on-failure
 
 [Install]

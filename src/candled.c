@@ -25,8 +25,8 @@
 #include <arpa/inet.h>
 
 #define MAX_PAIRS 256
-static const char *dir = ".";
-typedef struct { char name[24]; Series s; int started; } Coin;
+static const char *dir = ".", *dir2 = NULL;      /* the primary files (perps), and the backfill (spot) for the time before the primary has data */
+typedef struct { char name[24]; Series a, b; int has_a, has_b; time_t checked; } Coin;
 static Coin coins[MAX_PAIRS];
 static int ncoins;
 static pthread_mutex_t reg = PTHREAD_MUTEX_INITIALIZER;
@@ -43,56 +43,82 @@ static int valid_pair(const char *p)
 
 static void *history_thread(void *arg)
 {
-    Coin *c = arg;
-    while (series_history(&c->s, 4 << 20)) ;
+    Series *s = arg;
+    while (series_history(s, 4 << 20)) ;
     return NULL;
 }
 
-/* find or create the series of a pair; the first request folds the newest day at once and starts the history scan */
+/* open the file NAME.bin of a directory if it is a usable candle file: the newest three days at once, the rest in a background thread */
+static int open_series(Series *s, const char *d, const char *name)
+{
+    char path[768]; snprintf(path, sizeof path, "%s/%s.bin", d, name);
+    if (!series_valid(path)) return 0;
+    if (series_open(s, path, SERIES_CAP) != 0) return 0;
+    if (series_tail(s, 3 * 86400 * 10) != 0) { series_close(s); return 0; }
+    pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_create(&th, &at, history_thread, s);
+    pthread_attr_destroy(&at);
+    return 1;
+}
+
+/* find or create the coin of a pair; a primary file that appears later (the perp collector started after this server) is picked up within ten seconds */
 static Coin *coin_get(const char *name)
 {
     pthread_mutex_lock(&reg);
     Coin *c = NULL;
     for (int i = 0; i < ncoins; i++) if (!strcmp(coins[i].name, name)) { c = &coins[i]; break; }
     if (!c) {
-        char path[768]; snprintf(path, sizeof path, "%s/%s.bin", dir, name);
-        if (!series_valid(path) || ncoins >= MAX_PAIRS) { pthread_mutex_unlock(&reg); return NULL; }
+        if (ncoins >= MAX_PAIRS) { pthread_mutex_unlock(&reg); return NULL; }
         c = &coins[ncoins];
+        memset(c, 0, sizeof *c);
         snprintf(c->name, sizeof c->name, "%s", name);
-        if (series_open(&c->s, path, SERIES_CAP) != 0 || series_tail(&c->s, 3 * 86400 * 10) != 0) { pthread_mutex_unlock(&reg); return NULL; }
+        c->has_a = open_series(&c->a, dir, name);
+        c->has_b = dir2 ? open_series(&c->b, dir2, name) : 0;
+        if (!c->has_a && !c->has_b) { pthread_mutex_unlock(&reg); return NULL; }
+        c->checked = time(NULL);
         ncoins++;
-        pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-        if (pthread_create(&th, &at, history_thread, c) == 0) c->started = 1;
-        pthread_attr_destroy(&at);
+    } else if ((!c->has_a || (dir2 && !c->has_b)) && time(NULL) - c->checked > 10) {
+        c->checked = time(NULL);
+        if (!c->has_a) c->has_a = open_series(&c->a, dir, name);
+        if (dir2 && !c->has_b) c->has_b = open_series(&c->b, dir2, name);
     }
     pthread_mutex_unlock(&reg);
     return c;
 }
 
+typedef struct { char n[64]; time_t t; } PairEnt;
+
 static int by_mtime_desc(const void *a, const void *b)
 {
-    const struct { char n[64]; time_t t; } *x = a, *y = b;
+    const PairEnt *x = a, *y = b;
     return (y->t > x->t) - (y->t < x->t);
+}
+
+static void scan_dir(const char *d, PairEnt *list, int *n)
+{
+    DIR *dp = opendir(d);
+    if (!dp) return;
+    struct dirent *e;
+    while ((e = readdir(dp)) && *n < MAX_PAIRS) {
+        size_t l = strlen(e->d_name);
+        if (l < 5 || strcmp(e->d_name + l - 4, ".bin") || l - 4 >= sizeof list[0].n || l - 4 > 16) continue;
+        char path[768]; snprintf(path, sizeof path, "%s/%s", d, e->d_name);
+        struct stat st; if (stat(path, &st) < 0 || !series_valid(path)) continue;
+        if (st.st_mtime < time(NULL) - 3 * 86400) continue;           /* not written for three days: the collector is not on it */
+        char nm[64]; memcpy(nm, e->d_name, l - 4); nm[l - 4] = 0;
+        if (!valid_pair(nm)) continue;
+        int k; for (k = 0; k < *n; k++) if (!strcmp(list[k].n, nm)) break;
+        if (k < *n) { if (st.st_mtime > list[k].t) list[k].t = st.st_mtime; continue; }
+        memcpy(list[*n].n, nm, strlen(nm) + 1); list[*n].t = st.st_mtime; (*n)++;
+    }
+    closedir(dp);
 }
 
 static int pairs_json(char *buf, size_t cap)
 {
-    struct { char n[64]; time_t t; } list[MAX_PAIRS];
-    int n = 0;
-    DIR *d = opendir(dir);
-    if (!d) return snprintf(buf, cap, "[]");
-    struct dirent *e;
-    while ((e = readdir(d)) && n < MAX_PAIRS) {
-        size_t l = strlen(e->d_name);
-        if (l < 5 || strcmp(e->d_name + l - 4, ".bin") || l - 4 >= sizeof list[0].n || l - 4 > 16) continue;
-        char path[768]; snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
-        struct stat st; if (stat(path, &st) < 0 || !series_valid(path)) continue;
-        memcpy(list[n].n, e->d_name, l - 4); list[n].n[l - 4] = 0;
-        if (!valid_pair(list[n].n)) continue;
-        if (st.st_mtime < time(NULL) - 3 * 86400) continue;           /* not written for three days: the collector is not on it */
-        list[n].t = st.st_mtime; n++;
-    }
-    closedir(d);
+    PairEnt list[MAX_PAIRS]; int n = 0;
+    scan_dir(dir, list, &n);
+    if (dir2) scan_dir(dir2, list, &n);
     qsort(list, (size_t)n, sizeof list[0], by_mtime_desc);
     int o = snprintf(buf, cap, "[");
     for (int i = 0; i < n; i++) o += snprintf(buf + o, cap - (size_t)o, "%s\"%s\"", i ? "," : "", list[i].n);
@@ -157,8 +183,9 @@ static int handle(int fd, char *body, size_t bodycap, Out *out)
         if (n > MAX_BARS) n = MAX_BARS;
         Coin *c = coin_get(pair);
         if (!c) { respond(fd, 404, "Not Found", "{\"error\":\"no such pair\"}", 24); return 1; }
-        series_refresh(&c->s);
-        series_query(&c->s, tf, n, now_ms(), out);
+        if (c->has_a) series_refresh(&c->a);
+        if (c->has_b) series_refresh(&c->b);
+        series_query2(c->has_a ? &c->a : NULL, c->has_b ? &c->b : NULL, tf, n, now_ms(), out);
         int o = snprintf(body, bodycap, "{\"pair\":\"%s\",\"tf\":\"%s\",\"price\":%.8g,\"age_ms\":%lld,\"complete\":%s,\"n\":%d,",
                          pair, tfs, (double)out->price, (long long)out->age_ms, out->complete ? "true" : "false", out->n);
         arr(body, bodycap, &o, "t", NULL, out->t, out->n); o += snprintf(body + o, bodycap - (size_t)o, ",");
@@ -196,10 +223,11 @@ int main(int argc, char **argv)
     int port = 8766; const char *bind_addr = "0.0.0.0";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dir") && i + 1 < argc) dir = argv[++i];
+        else if (!strcmp(argv[i], "--backfill") && i + 1 < argc) dir2 = argv[++i];
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bind") && i + 1 < argc) bind_addr = argv[++i];
         else if (!strcmp(argv[i], "--version")) { puts("candled " PACKAGE_VERSION); return 0; }
-        else { fprintf(stderr, "usage: candled --dir DIR [--port N] [--bind ADDR]\n"); return 2; }
+        else { fprintf(stderr, "usage: candled --dir DIR [--backfill DIR] [--port N] [--bind ADDR]\n"); return 2; }
     }
     signal(SIGPIPE, SIG_IGN);
     int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
@@ -207,7 +235,7 @@ int main(int argc, char **argv)
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
     if (inet_pton(AF_INET, bind_addr, &a.sin_addr) != 1) { fprintf(stderr, "candled: bad address %s\n", bind_addr); return 2; }
     if (bind(ls, (struct sockaddr *)&a, sizeof a) < 0 || listen(ls, 16) < 0) { perror("candled: bind"); return 1; }
-    fprintf(stderr, "candled: serving %s on %s:%d\n", dir, bind_addr, port);
+    fprintf(stderr, "candled: serving %s%s%s on %s:%d\n", dir, dir2 ? " backfilled from " : "", dir2 ? dir2 : "", bind_addr, port);
     for (;;) {
         int fd = accept(ls, NULL, NULL);
         if (fd < 0) { if (errno == EINTR) continue; perror("accept"); sleep(1); continue; }

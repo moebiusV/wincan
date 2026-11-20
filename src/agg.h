@@ -55,6 +55,8 @@ int  series_tail(Series *s, int64_t recent_recs);                /* fold the new
 int  series_history(Series *s, int64_t nrecs);                   /* fold nrecs older records; returns 1 while there is more, 0 when done */
 int  series_refresh(Series *s);                                  /* fold what the collector has appended since; 0 on success */
 void series_query(Series *s, int tf_minutes, int n, int64_t now_ms, Out *out);
+/* the same from two series: a minute is taken from the primary where it has one, else from the backfill (either may be NULL) */
+void series_query2(Series *primary, Series *backfill, int tf_minutes, int n, int64_t now_ms, Out *out);
 int  tf_minutes(const char *name);                               /* "5m" -> 5; 0 when not one of the nine */
 
 #endif

@@ -5,7 +5,7 @@ candled \- serve candles from a collector's binary files, as JSON
 .B candled
 .B \-\-dir
 .I DIR
-[\fB\-\-port\fR \fIN\fR] [\fB\-\-bind\fR \fIADDRESS\fR]
+[\fB\-\-backfill\fR \fIDIR\fR] [\fB\-\-port\fR \fIN\fR] [\fB\-\-bind\fR \fIADDRESS\fR]
 .SH DESCRIPTION
 .B candled
 reads the files
@@ -37,6 +37,17 @@ appended.  The timeframes 1m 3m 5m 15m 30m 1h 4h 1d 1w are made from the minute 
 .TP
 .BI \-\-dir " DIR"
 the directory of the .bin files (default: the current directory).
+.TP
+.BI \-\-backfill " DIR"
+a second directory of .bin files (for example the spot candles while
+.B \-\-dir
+holds the perpetual futures'): a minute is taken from
+.B \-\-dir
+where it has data and otherwise from the backfill, so the charts have the full history from the first day and the primary's data takes over from the moment it starts.  The price and age are the primary's once it has data.  A file that appears in
+.B \-\-dir
+after the server has started is picked up within ten seconds.  Without it only
+.B \-\-dir
+is read.
 .TP
 .BI \-\-port " N"
 the TCP port (default 8766).

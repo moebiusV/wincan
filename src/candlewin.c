@@ -53,6 +53,7 @@ static struct {
     char   ip[64];                       /* the server's address, found once: resolving a .local name takes a third of a second */
     HANDLE wake; volatile int quit;
     /* ui */
+    int    ind[3], hover;                 /* indicators on/off: Bollinger bands, 9 MA, 200 MA; the dot the mouse is over (-1: none) */
     int    active, dragging, editing, tracking, hidden;   /* editing: 0 none, 'e' entry, 's' size */
     char   edit[32];
     HWND   prev;                         /* the window that had the keyboard before a click */
@@ -102,10 +103,14 @@ static Position *cur_pos(void)
 
 static void save_all(void)
 {
+    if (A.shot) return;                  /* a test picture changes no settings */
     char b[192];
     WritePrivateProfileStringA("candlewin", "pair", A.pair, A.ini);
     WritePrivateProfileStringA("candlewin", "tf", TFS[A.tf], A.ini);
     snprintf(b, sizeof b, "%d", A.scale); WritePrivateProfileStringA("candlewin", "scale", b, A.ini);
+    WritePrivateProfileStringA("candlewin", "bollinger", A.ind[0] ? "1" : "0", A.ini);
+    WritePrivateProfileStringA("candlewin", "ma9", A.ind[1] ? "1" : "0", A.ini);
+    WritePrivateProfileStringA("candlewin", "ma200", A.ind[2] ? "1" : "0", A.ini);
     snprintf(b, sizeof b, "%s:%d", A.host, A.port); WritePrivateProfileStringA("candlewin", "server", b, A.ini);
     RECT r;
     if (A.hwnd && !A.shot && GetWindowRect(A.hwnd, &r)) {
@@ -232,7 +237,7 @@ static DWORD WINAPI worker(LPVOID arg)
         char pair[24]; int tf, bars;
         EnterCriticalSection(&A.cs);
         snprintf(pair, sizeof pair, "%s", A.pair); tf = A.tf;
-        bars = (BASE_W * A.scale / 100 - 8) / 4; if (bars > MAX_BARS) bars = MAX_BARS; if (bars < 10) bars = 10;
+        bars = (BASE_W * A.scale / 100 - 8) / 4 + 205; if (bars > MAX_BARS) bars = MAX_BARS; if (bars < 10) bars = 10;      /* what is shown, and 200 more for the longest average */
         LeaveCriticalSection(&A.cs);
         char path[160]; snprintf(path, sizeof path, "/candles?pair=%s&tf=%s&n=%d", pair, TFS[tf], bars);
         char *b = http_get(path);
@@ -309,6 +314,14 @@ static void rect(HDC dc, int x0, int y0, int x1, int y1, COLORREF c)
 #define COL_TXT   RGB(214, 220, 226)
 #define COL_DIM   RGB(120, 130, 140)
 #define COL_ENTRY RGB(240, 200, 60)
+#define COL_BB    RGB(170, 120, 230)
+#define COL_MA9   RGB(255, 160, 40)
+#define COL_MA200 RGB(70, 200, 240)
+static const COLORREF IND_COL[3] = { COL_BB, COL_MA9, COL_MA200 };
+static const char *IND_NAME[3] = { "Bollinger bands (20, 2)", "9-period moving average", "200-period moving average" };
+
+/* the centre of the dot of an indicator, and its radius, in a window W by H at the factor u */
+static void dot_pos(int k, int W, int H, double u, int *cx, int *cy, int *r) { *cx = W - (int)(14 * u) - k * (int)(13 * u); *cy = H - (int)(8 * u); *r = (int)(3.5 * u + 0.5); }
 
 static void paint(HDC dc, int W, int H)
 {
@@ -337,8 +350,21 @@ static void paint(HDC dc, int W, int H)
         text(dc, fn, failed ? COL_DOWN : COL_DIM, W / 2, H / 2 - U(8), failed ? "no data from the server" : "loading...", 2);
     } else {
         /* the chart */
-        double hi = h[0], lo = l[0];
-        for (int i = 1; i < n; i++) { if (h[i] > hi) hi = h[i]; if (l[i] < lo) lo = l[i]; }
+        int vis = (W - U(8)) / 4; if (vis < 10) vis = 10;
+        int dn = n < vis ? n : vis, base = n - dn;                      /* the bars shown are base .. n-1 */
+        static double ma9[MAX_BARS], ma200[MAX_BARS], bbm[MAX_BARS], bbu[MAX_BARS], bbl[MAX_BARS];
+        static unsigned char ok9[MAX_BARS], ok200[MAX_BARS], okbb[MAX_BARS];
+        for (int i = 0; i < n; i++) {
+            ok9[i] = ok200[i] = okbb[i] = 0;
+            if (i >= 8)   { double sum = 0; for (int k = i - 8; k <= i; k++) sum += c[k]; ma9[i] = sum / 9; ok9[i] = 1; }
+            if (i >= 199) { double sum = 0; for (int k = i - 199; k <= i; k++) sum += c[k]; ma200[i] = sum / 200; ok200[i] = 1; }
+            if (i >= 19)  { double sum = 0, sq = 0; for (int k = i - 19; k <= i; k++) sum += c[k];
+                            double m = sum / 20; for (int k = i - 19; k <= i; k++) sq += (c[k] - m) * (c[k] - m);
+                            double sd = sqrt(sq / 20); bbm[i] = m; bbu[i] = m + 2 * sd; bbl[i] = m - 2 * sd; okbb[i] = 1; }
+        }
+        double hi = h[base], lo = l[base];
+        for (int i = base + 1; i < n; i++) { if (h[i] > hi) hi = h[i]; if (l[i] < lo) lo = l[i]; }
+        if (A.ind[0]) for (int i = base; i < n; i++) if (okbb[i]) { if (bbu[i] > hi) hi = bbu[i]; if (bbl[i] < lo) lo = bbl[i]; }
         double range = hi - lo; if (range <= 0) range = hi * 0.001 + 1e-9;
         if (pos.entry > 0 && pos.size != 0 && pos.entry < hi + range && pos.entry > lo - range) {      /* the entry line is in the picture if near */
             if (pos.entry > hi) hi = pos.entry;
@@ -348,12 +374,21 @@ static void paint(HDC dc, int W, int H)
         double pad = range * 0.04; hi += pad; lo -= pad; range = hi - lo;
         int cw = W - U(8), ch = bot - top;
         #define Y(p) (top + (int)((hi - (p)) / range * ch + 0.5))
-        int step = n > 0 ? cw / n : 4; if (step < 2) step = 2;
+        int step = dn > 0 ? cw / dn : 4; if (step < 2) step = 2;
         int bw = step >= 4 ? step - 1 : step - 1 > 0 ? step - 1 : 1; if (bw > step - 1 && step > 1) bw = step - 1;
-        int x0 = U(4) + (cw - step * n);                         /* the newest bar at the right */
-        for (int i = 0; i < n; i++) {
+        int x0 = U(4) + (cw - step * dn);                        /* the newest bar at the right */
+        HRGN clip = CreateRectRgn(0, top, W, bot); SelectClipRgn(dc, clip);          /* the lines stay in the chart */
+        #define LINE(arr, okarr, col, style) do { HPEN pn = CreatePen(style, 1, col); HGDIOBJ op = SelectObject(dc, pn); int started = 0; \
+            for (int i = base; i < n; i++) { if (!okarr[i]) { started = 0; continue; } int px = x0 + (i - base) * step + bw / 2, py = Y(arr[i]); \
+                if (!started) { MoveToEx(dc, px, py, NULL); started = 1; } else LineTo(dc, px, py); } \
+            SelectObject(dc, op); DeleteObject(pn); } while (0)
+        if (A.ind[0]) { LINE(bbu, okbb, COL_BB, PS_SOLID); LINE(bbl, okbb, COL_BB, PS_SOLID); LINE(bbm, okbb, RGB(110, 80, 150), PS_SOLID); }
+        if (A.ind[2]) LINE(ma200, ok200, COL_MA200, PS_SOLID);
+        if (A.ind[1]) LINE(ma9, ok9, COL_MA9, PS_SOLID);
+        SelectClipRgn(dc, NULL); DeleteObject(clip);
+        for (int i = base; i < n; i++) {
             COLORREF col = c[i] >= o[i] ? COL_UP : COL_DOWN;
-            int x = x0 + i * step, cx = x + bw / 2;
+            int x = x0 + (i - base) * step, cx = x + bw / 2;
             rect(dc, cx, Y(h[i]), cx + 1, Y(l[i]) + 1, col);
             int yo = Y(o[i]), yc = Y(c[i]); if (yo > yc) { int tmp = yo; yo = yc; yc = tmp; }
             rect(dc, x, yo, x + bw, yc + 1 > yo + 1 ? yc + 1 : yo + 1, col);
@@ -384,11 +419,24 @@ static void paint(HDC dc, int W, int H)
         snprintf(buf, sizeof buf, "%+.2f%%", pct); fmt_money(usd, buf2, sizeof buf2);
         text(dc, fp, col, U(6), fy, buf, 0);
         text(dc, fp, col, W - U(6), fy, buf2, 1);
-        if (A.active) text(dc, fs, COL_DIM, U(6), fy + U(22), "up/down time   left/right coin   e entry   s size   del   x q quit", 0);
+        if (A.active) text(dc, fs, COL_DIM, U(6), fy + U(22), "up/down time  left/right coin  e s  del  q quit", 0);
         else { fmt_price(pos.entry, buf, sizeof buf); snprintf(buf2, sizeof buf2, "%.6g @ %s", pos.size, buf); text(dc, fs, COL_DIM, U(6), fy + U(22), buf2, 0); }
     } else {
         text(dc, fn, COL_DIM, U(6), fy + U(4), "no position", 0);
         text(dc, fs, COL_DIM, U(6), fy + U(22), A.active ? "e entry price   s size   x or q quit" : "click, then e / s to enter a position", 0);
+    }
+    for (int k = 0; k < 3; k++) {                                /* the toggles: a filled dot is on, a ring is off */
+        int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r);
+        HBRUSH br = A.ind[k] ? CreateSolidBrush(IND_COL[k]) : (HBRUSH)GetStockObject(NULL_BRUSH);
+        HPEN pn = CreatePen(PS_SOLID, 1, IND_COL[k]); HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, pn);
+        Ellipse(dc, cx - r, cy - r, cx + r + 1, cy + r + 1);
+        SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(pn); if (A.ind[k]) DeleteObject(br);
+    }
+    if (A.hover >= 0 && A.hover < 3) {                           /* the label of the dot the mouse is on */
+        char lab[64]; snprintf(lab, sizeof lab, "%s: %s", IND_NAME[A.hover], A.ind[A.hover] ? "on" : "off");
+        int cx, cy, r; dot_pos(2, W, H, u, &cx, &cy, &r);
+        rect(dc, W / 3, H - U(17), cx - U(8), H - U(2), COL_BG);
+        text(dc, fs, IND_COL[A.hover], cx - U(10), H - U(16), lab, 1);
     }
     if (A.active) {                                              /* the window has the keyboard */
         HPEN pen = CreatePen(PS_SOLID, 1, RGB(70, 130, 200)); HGDIOBJ oldp = SelectObject(dc, pen), oldb = SelectObject(dc, GetStockObject(NULL_BRUSH));
@@ -562,7 +610,13 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         return 0;
     case WM_MOUSEACTIVATE: return A.active ? MA_ACTIVATE : MA_NOACTIVATE;
-    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDOWN: {
+        int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = win_w(), H = win_h(); double u = W / (double)BASE_W;
+        for (int k = 0; k < 3; k++) {                                          /* a click on a dot toggles it */
+            int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r);
+            if (abs(mx - cx) <= r + 3 && abs(my - cy) <= r + 3) { A.ind[k] = !A.ind[k]; save_all(); InvalidateRect(h, NULL, FALSE); return 0; }
+        }
+        }
         take_keyboard();
         A.dragging = 1; ReleaseCapture(); SendMessage(h, WM_NCLBUTTONDOWN, HTCAPTION, 0); A.dragging = 0;       /* a click and drag moves the window */
         { POINT pt; RECT r; GetCursorPos(&pt); GetWindowRect(h, &r); if (!PtInRect(&r, pt)) give_up_keyboard(); }
@@ -577,11 +631,16 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         DestroyMenu(mn);
         if (cmd == IDM_SHOW) show_hide(0); else if (cmd == IDM_EXIT) quit_app();
         return 0; }
-    case WM_MOUSEMOVE:
+    case WM_MOUSEMOVE: {
+        int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = win_w(), H = win_h(), hv = -1; double u = W / (double)BASE_W;
+        for (int k = 0; k < 3; k++) { int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r); if (abs(mx - cx) <= r + 3 && abs(my - cy) <= r + 3) hv = k; }
+        if (hv != A.hover) { A.hover = hv; InvalidateRect(h, NULL, FALSE); }
+        }
         if (!A.tracking) { TRACKMOUSEEVENT te = { sizeof te, TME_LEAVE, h, 0 }; TrackMouseEvent(&te); A.tracking = 1; }
         return 0;
     case WM_MOUSELEAVE:
         A.tracking = 0;
+        if (A.hover != -1) { A.hover = -1; InvalidateRect(h, NULL, FALSE); }
         if (A.active && !A.dragging && !A.editing) give_up_keyboard();               /* the mouse out of the window: it gives the keyboard back at once */
         return 0;
     case WM_KILLFOCUS: if (A.active && !A.dragging) { A.active = 0; A.editing = 0; set_passive(1); InvalidateRect(h, NULL, FALSE); } return 0;
@@ -647,6 +706,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     GetPrivateProfileStringA("candlewin", "pair", "BTC", A.pair, sizeof A.pair, A.ini);
     char tfs[8]; GetPrivateProfileStringA("candlewin", "tf", "5m", tfs, sizeof tfs, A.ini);
     A.tf = 2; for (int i = 0; i < NTF; i++) if (!strcmp(tfs, TFS[i])) A.tf = i;
+    A.ind[0] = GetPrivateProfileIntA("candlewin", "bollinger", 1, A.ini); A.ind[1] = GetPrivateProfileIntA("candlewin", "ma9", 1, A.ini); A.ind[2] = GetPrivateProfileIntA("candlewin", "ma200", 1, A.ini); A.hover = -1;
     A.scale = GetPrivateProfileIntA("candlewin", "scale", 100, A.ini); if (A.scale < 75 || A.scale > 400) A.scale = 100;
     int server_given = 0, argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; i++) {
@@ -658,6 +718,8 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
         else if (!strcmp(a, "--shot") && i + 1 < argc) { static char shot[260]; snprintf(shot, sizeof shot, "%s", nx); A.shot = shot; i++; }
         else if (!strcmp(a, "--shot-position") && i + 1 < argc) { sscanf(nx, "%lf,%lf", &A.shot_entry, &A.shot_size); i++; }
         else if (!strcmp(a, "--shot-active")) A.shot_active = 1;
+        else if (!strcmp(a, "--shot-hover") && i + 1 < argc) { A.hover = atoi(nx); i++; }
+        else if (!strcmp(a, "--shot-off") && i + 1 < argc) { A.ind[atoi(nx) % 3] = 0; i++; }
         else if (!strcmp(a, "--version")) { MessageBoxA(NULL, "candlewin " PACKAGE_VERSION, "candlewin", MB_OK); return 0; }
     }
     if (server_given && !A.shot) save_all();                       /* the server given on the command line is kept */
@@ -670,8 +732,10 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     RECT wa; SystemParametersInfo(SPI_GETWORKAREA, 0, &wa, 0);
     A.active = A.shot_active;
     int W = win_w(), H = win_h();
-    int x = GetPrivateProfileIntA("candlewin", "x", wa.right - W - 20, A.ini), y = GetPrivateProfileIntA("candlewin", "y", wa.top + 20, A.ini);
-    if (x < wa.left - W + 40 || x > wa.right - 40 || y < wa.top - 10 || y > wa.bottom - 40) { x = wa.right - W - 20; y = wa.top + 20; }       /* off every screen: bring it back */
+    /* the first time, the top left corner of the screen; a saved place is kept only if the whole window is on a screen (all the monitors count) */
+    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN), vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    int x = GetPrivateProfileIntA("candlewin", "x", wa.left + 8, A.ini), y = GetPrivateProfileIntA("candlewin", "y", wa.top + 8, A.ini);
+    if (x < vx || y < vy || x + W > vx + vw || y + H > vy + vh) { x = wa.left + 8; y = wa.top + 8; }
     A.hwnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_APPWINDOW | WS_EX_NOACTIVATE, "candlewin", "candlewin", WS_POPUP, x, y, W, H, NULL, NULL, hi, NULL);
     if (!A.hwnd) return 1;
     tray_add();

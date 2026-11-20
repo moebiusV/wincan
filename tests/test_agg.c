@@ -139,8 +139,45 @@ static void check_break(void)
     series_close(&s); unlink(p);
 }
 
+/* the perp file starts two hours into the spot file: before that the chart is spot, after it perp */
+static void check_backfill(void)
+{
+    const char *ps = "/tmp/candlewin-test-spot.bin", *pp = "/tmp/candlewin-test-perp.bin";
+    unlink(ps); unlink(pp);
+    long long t0 = 1700000040000LL;                              /* a whole minute */
+    long NS = 3 * 36000;                                         /* three hours of spot */
+    FILE *f = fopen(ps, "wb");
+    for (long i = 0; i < NS; i++) { if (i % 600 == 0) marker(f, t0 + i * 100LL); Rec r = mk(i); frame(f, &r); }
+    fclose(f);
+    set_mtime(ps, t0 + NS * 100LL);
+    long NP = 36000;                                             /* an hour of perp, from the end of the second hour */
+    long long tp = t0 + 7200000LL;
+    f = fopen(pp, "wb");
+    for (long j = 0; j < NP; j++) { if (j % 600 == 0) marker(f, tp + j * 100LL); Rec r = mk(j); r.O *= 1.001f; r.H *= 1.001f; r.L *= 1.001f; r.C *= 1.001f; frame(f, &r); }
+    fclose(f);
+    set_mtime(pp, tp + NP * 100LL);
+    Series sp, pe; series_open(&sp, ps, 20000); series_open(&pe, pp, 20000);
+    series_tail(&sp, 5000); while (series_history(&sp, 400000)) ;
+    series_tail(&pe, 5000); while (series_history(&pe, 400000)) ;
+    Out o; series_query2(&pe, &sp, 1, 200, tp + NP * 100LL, &o);
+    CHECK("backfill: 180 minutes", o.n == 180);
+    int found_s = 0, found_p = 0;
+    for (int i = 0; i < o.n; i++) {
+        long long minute = (o.t[i] - t0 / 1000) / 60;
+        if (minute == 30) { found_s = 1; CHECK("backfill: spot before the perp starts", fabs(o.c[i] - mk(30 * 600 + 599).C) < 1e-3); }
+        if (minute == 150) { found_p = 1; CHECK("backfill: perp after it starts", fabs(o.c[i] - 1.001f * mk(30 * 600 + 599).C) < 1e-2); }
+    }
+    CHECK("backfill: spot bar found", found_s); CHECK("backfill: perp bar found", found_p);
+    Out one; series_query2(&pe, &sp, 60, 3, tp + NP * 100LL, &one);
+    CHECK("backfill: the price is the perp's", fabs(one.price - 1.001f * mk(NP - 1).C) < 1e-2);
+    Out only; series_query2(NULL, &sp, 60, 3, tp + NP * 100LL, &only);
+    CHECK("backfill: spot alone", only.n == 3 && fabs(only.price - mk(NS - 1).C) < 1e-3);
+    series_close(&sp); series_close(&pe); unlink(ps); unlink(pp);
+}
+
 int main(void)
 {
+    check_backfill();
     check_break();
     check_file("with markers", 1);
     check_file("without markers", 0);

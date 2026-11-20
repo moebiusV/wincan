@@ -1,6 +1,7 @@
 /* agg.c -- see agg.h */
 #define _GNU_SOURCE
 #include "agg.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -271,37 +272,61 @@ static int refresh_locked(Series *s)
     return rc;
 }
 
-void series_query(Series *s, int tf, int n, int64_t now_ms, Out *out)
+static const Bar *bar_at(const Series *s, int64_t minute)
+{
+    if (!s) return NULL;
+    int64_t i = minute - s->base_min;
+    if (i < 0 || i >= s->cap || !s->bars[i].has) return NULL;
+    return &s->bars[i];
+}
+
+static int64_t last_minute(const Series *s)
+{
+    if (!s) return INT64_MIN;
+    for (int64_t i = s->cap - 1; i >= 0; i--) if (s->bars[i].has) return s->base_min + i;
+    return INT64_MIN;
+}
+
+void series_query2(Series *p, Series *b2, int tf, int n, int64_t now_ms, Out *out)
 {
     memset(out, 0, sizeof *out);
     if (n > MAX_BARS) n = MAX_BARS;
     if (n < 1) n = 1;
-    pthread_mutex_lock(&s->mu);
-    out->price = s->price; out->age_ms = now_ms - s->next_ms; out->complete = s->history_done;
-    int64_t last = -1;
-    for (int64_t i = s->cap - 1; i >= 0; i--) if (s->bars[i].has) { last = i; break; }
-    if (last >= 0) {
-        int64_t lastmin = s->base_min + last, step = tf, off = (tf == 10080) ? 5760 : 0;    /* weeks begin on Monday: 1970-01-05 */
+    if (p) pthread_mutex_lock(&p->mu);
+    if (b2) pthread_mutex_lock(&b2->mu);
+    int64_t lp = last_minute(p), ls = last_minute(b2);
+    const Series *lead = (p && lp != INT64_MIN) ? p : b2;               /* the price and the age come from the primary once it has data */
+    if (lead) { out->price = lead->price; out->age_ms = now_ms - lead->next_ms; }
+    out->complete = (!p || p->history_done) && (!b2 || b2->history_done);
+    int64_t lastmin = lp > ls ? lp : ls;
+    int64_t oldest = INT64_MAX;
+    if (p && p->base_min < oldest) oldest = p->base_min;
+    if (b2 && b2->base_min < oldest) oldest = b2->base_min;
+    if (lastmin != INT64_MIN) {
+        int64_t step = tf, off = (tf == 10080) ? 5760 : 0;                   /* weeks begin on Monday: 1970-01-05 */
         int64_t key = floor_div(lastmin - off, step) * step + off;
-        Out tmp; int cnt = 0;
+        static __thread Out tmp; int cnt = 0;
         for (; cnt < n; key -= step) {
             float o = 0, h = 0, l = 0, c = 0, v = 0; int got = 0;
+            if (key + step - 1 < oldest) break;                              /* past the oldest bar */
             for (int64_t m = key; m < key + step; m++) {
-                int64_t i = m - s->base_min;
-                if (i < 0 || i >= s->cap || !s->bars[i].has) continue;
-                const Bar *b = &s->bars[i];
-                if (!got) { o = b->o; h = b->h; l = b->l; got = 1; } else { if (b->h > h) h = b->h; if (b->l < l) l = b->l; }
-                c = b->c; v += b->v;
+                const Bar *bb = bar_at(p, m);
+                if (!bb) bb = bar_at(b2, m);
+                if (!bb) continue;
+                if (!got) { o = bb->o; h = bb->h; l = bb->l; got = 1; } else { if (bb->h > h) h = bb->h; if (bb->l < l) l = bb->l; }
+                c = bb->c; v += bb->v;
             }
-            if (key + step - 1 < s->base_min) break;                       /* past the oldest bar */
-            if (!got) continue;                                            /* a gap: no bar */
+            if (!got) continue;                                              /* a gap: no bar */
             tmp.t[cnt] = key * 60; tmp.o[cnt] = o; tmp.h[cnt] = h; tmp.l[cnt] = l; tmp.c[cnt] = c; tmp.v[cnt] = v; cnt++;
         }
         out->n = cnt;
-        for (int i = 0; i < cnt; i++) {                                    /* oldest first */
+        for (int i = 0; i < cnt; i++) {                                      /* oldest first */
             int j = cnt - 1 - i;
             out->t[i] = tmp.t[j]; out->o[i] = tmp.o[j]; out->h[i] = tmp.h[j]; out->l[i] = tmp.l[j]; out->c[i] = tmp.c[j]; out->v[i] = tmp.v[j];
         }
     }
-    pthread_mutex_unlock(&s->mu);
+    if (b2) pthread_mutex_unlock(&b2->mu);
+    if (p) pthread_mutex_unlock(&p->mu);
 }
+
+void series_query(Series *s, int tf, int n, int64_t now_ms, Out *out) { series_query2(s, NULL, tf, n, now_ms, out); }
