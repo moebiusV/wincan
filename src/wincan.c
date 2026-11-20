@@ -530,13 +530,25 @@ static void paint(HDC dc, int W, int H)
             HPEN pen = CreatePen(PS_DOT, 1, COL_ENTRY); HGDIOBJ old = SelectObject(dc, pen);
             SetBkMode(dc, TRANSPARENT); MoveToEx(dc, U(4), y, NULL); LineTo(dc, W - U(4), y); SelectObject(dc, old); DeleteObject(pen);
         }
+        /* the highest high and the lowest low of the bars on show: a dotted line across the window, and its value above (or below) it at the left, away from the candle forming at the right */
+        int ihi = base, ilo = base;
+        for (int i = base + 1; i < n; i++) { if (h[i] > h[ihi]) ihi = i; if (l[i] < l[ilo]) ilo = i; }
+        for (int k = 0; k < 2; k++) {
+            int idx = k == 0 ? ihi : ilo, yy = Y(k == 0 ? h[idx] : l[idx]), xs = U(4);
+            HPEN pen = CreatePen(PS_DOT, 1, RGB(100, 112, 128)); HGDIOBJ old = SelectObject(dc, pen);
+            SetBkMode(dc, TRANSPARENT); MoveToEx(dc, xs, yy, NULL); LineTo(dc, W - U(2), yy); SelectObject(dc, old); DeleteObject(pen);
+            fmt_price(k == 0 ? h[idx] : l[idx], buf, sizeof buf);
+            int ty = k == 0 ? yy - U(11) : yy + U(1);
+            if (ty < top - U(2)) ty = yy + U(1);                                  /* no room above: below the line */
+            if (ty > bot - U(9)) ty = yy - U(11);                                 /* no room below: above it */
+            text(dc, fs, RGB(150, 162, 178), U(5), ty, buf, 0);
+        }
+        /* the line of the price now, in the colour of the candle that is forming */
         double mx = c[n - 1]; int ypl = Y(mx);
-        { HPEN pen = CreatePen(PS_SOLID, 1, RGB(70, 80, 92)); HGDIOBJ old = SelectObject(dc, pen); MoveToEx(dc, U(4), ypl, NULL); LineTo(dc, W - U(4), ypl); SelectObject(dc, old); DeleteObject(pen); }
-        fmt_price(hi - pad, buf, sizeof buf); text(dc, fs, COL_DIM, U(5), top - U(1), buf, 0);
-        fmt_price(lo + pad, buf, sizeof buf); text(dc, fs, COL_DIM, U(5), bot - U(11), buf, 0);
-        if (failed) text(dc, fs, COL_DOWN, W - U(5), top - U(1), "no connection: showing the last data", 1);          /* the chart stays, as it was */
-        else if (age > 20000) { snprintf(buf, sizeof buf, "%d s old", (int)(age / 1000)); text(dc, fs, COL_ENTRY, W - U(5), top - U(1), buf, 1); }
-        else if (!complete) text(dc, fs, COL_DIM, W - U(5), top - U(1), "history loading", 1);
+        { HPEN pen = CreatePen(PS_SOLID, 1, c[n - 1] >= o[n - 1] ? COL_UP : COL_DOWN); HGDIOBJ old = SelectObject(dc, pen); MoveToEx(dc, U(4), ypl, NULL); LineTo(dc, W - U(4), ypl); SelectObject(dc, old); DeleteObject(pen); }
+        if (failed) text(dc, fs, COL_DOWN, U(5), top - U(1), "no connection: showing the last data", 0);          /* the chart stays, as it was */
+        else if (age > 20000) { snprintf(buf, sizeof buf, "%d s old", (int)(age / 1000)); text(dc, fs, COL_ENTRY, U(5), top - U(1), buf, 0); }
+        else if (!complete) text(dc, fs, COL_DIM, U(5), top - U(1), "history loading", 0);
     }
 
     /* the footer: profit and loss */

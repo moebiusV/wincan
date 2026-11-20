@@ -4,3 +4,4 @@
 2026-11-20  Indicators with toggle dots; candled --backfill; the window starts at the top left and is kept on screen.
 2026-11-20  Incremental polling with a signature (unchanged answers); the current candle brighter and thicker with space to its right.
 2026-11-20  Renamed to wincan; position editor, close and trade log; /range; background refresh in candled; forward-fill and garbage handling in the aggregation; one copy only.
+2026-11-20  The price line takes the colour of the forming candle; the highest high and lowest low of the bars on show are marked by a dotted line across the window with the value at the left.
