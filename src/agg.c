@@ -322,6 +322,85 @@ static int db_refresh(Series *s)
     return n < 0 ? -1 : 0;
 }
 
+/* ---- a file of 80-byte one-minute candles ---- */
+
+#define BINREC 80
+#define BIN_DAYS_RECORDS 4600           /* the newest three days and a bit: the database has the history */
+
+int series_open_bin(Series *s, const char *path, int cap)
+{
+    if (series_open(s, path, cap) != 0) return -1;
+    s->is_bin = 1;
+    return 0;
+}
+
+/* records [from, to) of the file into the bars; returns the number taken; *last_ts and *last_close describe the newest */
+static int bin_load(Series *s, int fd, int64_t from, int64_t to, int64_t *last_ts, float *last_close_out)
+{
+    int64_t n = to - from;
+    if (n <= 0) return 0;
+    unsigned char *buf = malloc((size_t)n * BINREC);
+    if (!buf) return -1;
+    if (pread(fd, buf, (size_t)n * BINREC, (off_t)(from * BINREC)) != (ssize_t)(n * BINREC)) { free(buf); return -1; }
+    int taken = 0;
+    pthread_mutex_lock(&s->mu);
+    for (int64_t i = 0; i < n; i++) {
+        const unsigned char *r = buf + i * BINREC;
+        int64_t ts; double d[5];
+        memcpy(&ts, r, 8); memcpy(d, r + 8, sizeof d);
+        double o = d[0], h = d[1], l = d[2], c = d[3], v = d[4];
+        double mx = o > c ? o : c, mn = o < c ? o : c;
+        if (ts <= 0 || ts % 60 != 0 || !(o > 0 && h > 0 && l > 0 && c > 0) || h < mx * 0.9999 || l > mn * 1.0001 || h > mx * 3 || l < mn / 3) continue;      /* not a believable minute */
+        Bar *b = slot_for(s, ts / 60);
+        if (b) { b->o = (float)o; b->h = (float)h; b->l = (float)l; b->c = (float)c; b->v = (v >= 0 && v < 1e13) ? (float)v : 0; b->has = 1; taken++; }
+        if (last_ts && ts >= *last_ts) { *last_ts = ts; if (last_close_out) *last_close_out = (float)c; }
+    }
+    pthread_mutex_unlock(&s->mu);
+    free(buf);
+    return taken;
+}
+
+static int bin_tail(Series *s)
+{
+    struct stat st;
+    if (stat(s->path, &st) < 0 || st.st_size < BINREC) return -1;
+    int fd = open(s->path, O_RDONLY);
+    if (fd < 0) return -1;
+    int64_t n = (int64_t)st.st_size / BINREC, from = n > BIN_DAYS_RECORDS ? n - BIN_DAYS_RECORDS : 0;
+    int64_t lastrec_ts = 0;
+    if (pread(fd, &lastrec_ts, 8, (off_t)((n - 1) * BINREC)) != 8 || lastrec_ts <= 0) { close(fd); return -1; }
+    pthread_mutex_lock(&s->mu);
+    memset(s->bars, 0, (size_t)s->cap * sizeof(Bar));
+    s->base_min = floor_div(lastrec_ts, 60) - (s->cap - 1024);
+    pthread_mutex_unlock(&s->mu);
+    int64_t lt = 0; float lc = 0;
+    int taken = bin_load(s, fd, from, n, &lt, &lc);
+    close(fd);
+    if (taken <= 0) return -1;
+    s->pos = n * BINREC; s->history_done = 1;                          /* the database has the history */
+    s->first_ms = lt * 1000; s->next_ms = (lt + 60) * 1000; s->price = lc; s->db_last_ts = lt;
+    return 0;
+}
+
+static int bin_refresh(Series *s)
+{
+    struct stat st;
+    if (stat(s->path, &st) < 0) return -1;
+    if ((int64_t)st.st_size < s->pos) return bin_tail(s);              /* shorter than before: start again */
+    int64_t from = s->pos / BINREC, to = (int64_t)st.st_size / BINREC;
+    if (to <= from) return 0;
+    int fd = open(s->path, O_RDONLY);
+    if (fd < 0) return -1;
+    int64_t lt = s->db_last_ts; float lc = s->price;
+    int taken = bin_load(s, fd, from, to, &lt, &lc);
+    close(fd);
+    pthread_mutex_lock(&s->mu);
+    s->pos = to * BINREC;                                               /* a partial record at the end is read when it is whole */
+    if (taken > 0 && lt >= s->db_last_ts) { s->db_last_ts = lt; s->next_ms = (lt + 60) * 1000; s->price = lc; }
+    pthread_mutex_unlock(&s->mu);
+    return 0;
+}
+
 int series_valid(const char *path)
 {
     struct stat st;
@@ -339,6 +418,7 @@ int series_valid(const char *path)
 int series_tail(Series *s, int64_t recent)
 {
     if (s->is_db) return db_tail(s);
+    if (s->is_bin) return bin_tail(s);
     int64_t size, mt;
     if (stat_file(s, &size, &mt) < 0 || size < 4 * REC_SIZE) return -1;
     int fd = open(s->path, O_RDONLY);
@@ -401,6 +481,7 @@ int series_refresh(Series *s)
 static int refresh_locked(Series *s)
 {
     if (s->is_db) return db_refresh(s);
+    if (s->is_bin) return bin_refresh(s);
     int64_t size, mt;
     if (stat_file(s, &size, &mt) < 0) return -1;
     if (size == s->pos) return 0;
@@ -440,7 +521,10 @@ static int64_t last_minute(const Series *s)
  */
 static const Bar *pick(Series **l, int n, int64_t m, int live)
 {
-    if (!live) for (int i = 0; i < n; i++) if (l[i] && l[i]->is_db) { const Bar *b = bar_at(l[i], m); if (b) return b; }
+    if (!live) {                                                      /* the database first, then the exchange's own closed candles (the daemon's bins), then the rest in order */
+        for (int i = 0; i < n; i++) if (l[i] && l[i]->is_db) { const Bar *b = bar_at(l[i], m); if (b) return b; }
+        for (int i = 0; i < n; i++) if (l[i] && l[i]->is_bin) { const Bar *b = bar_at(l[i], m); if (b) return b; }
+    }
     const Bar *partial = NULL;
     for (int i = 0; i < n; i++) {
         const Bar *b = bar_at(l[i], m);
@@ -465,7 +549,7 @@ void series_queryN(Series **l, int cnt, int tf, int n, int64_t now_ms, Out *out)
         if (!l[i]) continue;
         int64_t lm = last_minute(l[i]);
         if (lm > lastmin) lastmin = lm;
-        if (!lead && lm != INT64_MIN) lead = l[i];                        /* the price and the age come from the first with data */
+        if (lm != INT64_MIN && (!lead || lm > last_minute(lead) || (lm == last_minute(lead) && l[i]->next_ms > lead->next_ms))) lead = l[i];      /* the price and the age come from the freshest source */
         if (l[i]->base_min < oldest) oldest = l[i]->base_min;
         if (!l[i]->history_done) complete = 0;
     }
@@ -505,7 +589,7 @@ void series_rangeN(Series **l, int cnt, int64_t since_sec, Range *r)
         if (!l[i]) continue;
         int64_t lm = last_minute(l[i]);
         if (lm > last) last = lm;
-        if (!lead && lm != INT64_MIN) lead = l[i];
+        if (lm != INT64_MIN && (!lead || lm > last_minute(lead) || (lm == last_minute(lead) && l[i]->next_ms > lead->next_ms))) lead = l[i];
         if (l[i]->base_min < oldest) oldest = l[i]->base_min;
     }
     if (lead) r->price = lead->price;

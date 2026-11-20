@@ -311,8 +311,69 @@ static void check_database(void)
     series_close(&sf); series_close(&sd); series_close(&sd2); sqlite3_close(db); unlink(pdb); unlink(pf);
 }
 
+/* the websocket daemon's bins: for closed minutes the exchange's own candles beat the ticks, the database beats both, and the forming minute comes from the ticks */
+static void check_bins(void)
+{
+    const char *pdb = "/tmp/wincan-test7.db", *pf = "/tmp/wincan-test7.bin", *pb = "/tmp/wincan-test7b.bin";
+    unlink(pdb); unlink(pf); unlink(pb);
+    long long t0 = ((long long)time(NULL) / 60 - 400) * 60000LL; long M0 = (long)(t0 / 60000);
+    sqlite3 *db; sqlite3_open(pdb, &db);
+    sqlite3_exec(db, "CREATE TABLE candles (pair TEXT, ts INTEGER, open REAL, high REAL, low REAL, close REAL, volume REAL)", 0, 0, 0);
+    sqlite3_exec(db, "BEGIN", 0, 0, 0);
+    char sql[256];
+    for (int i = 0; i < 140; i++) {                                   /* the database lags: minutes 0..139 only */
+        snprintf(sql, sizeof sql, "INSERT INTO candles VALUES ('TSTUSDT', %ld, %d, %d, %d, %d, 10)", (M0 + i) * 60, 1000 + i, 1002 + i, 999 + i, 1001 + i);
+        sqlite3_exec(db, sql, 0, 0, 0);
+    }
+    sqlite3_exec(db, "COMMIT", 0, 0, 0);
+    FILE *f = fopen(pf, "wb");                                        /* ticks: minutes 150..179, a price of 200 + (minute - 150) */
+    for (int i = 0; i < 18000; i++) {
+        if (i % 600 == 0) marker(f, t0 + (150LL * 60000) + (long long)i * 100LL);
+        Rec r; r.O = r.H = r.L = r.C = (float)(200 + i / 600); r.V = 1; r.J = 0; r.N = 1; frame(f, &r);
+    }
+    fclose(f);
+    set_mtime(pf, t0 + 180LL * 60000);
+    f = fopen(pb, "wb");                                              /* the daemon's bins: closed minutes 100..177, 3000 + i */
+    for (int i = 100; i < 178; i++) {
+        unsigned char rec[80]; memset(rec, 0, sizeof rec);
+        int64_t ts = (int64_t)(M0 + i) * 60; double d[8] = { 3000.0 + i, 3002.0 + i, 2999.0 + i, 3001.0 + i, 5, 0, 0, 0 };
+        memcpy(rec, &ts, 8); memcpy(rec + 8, d, sizeof d); fwrite(rec, 1, 80, f);
+    }
+    fclose(f);
+    Series sf, sd, sb; series_open(&sf, pf, 20000); series_tail(&sf, 20000); while (series_history(&sf, 400000)) ;
+    series_open_db(&sd, pdb, "TSTUSDT", 20000); series_tail(&sd, 0); while (series_history(&sd, 0)) ;
+    CHECK("bins: open", series_open_bin(&sb, pb, 20000) == 0);
+    CHECK("bins: tail", series_tail(&sb, 0) == 0);
+    Series *l[4] = { &sf, &sd, &sb, NULL };
+    Out o; series_queryN(l, 4, 1, 200, t0 + 180LL * 60000, &o);
+    int ok_db = 0, ok_old = 0, ok_bin = 0, ok_live = 0, ok_edge = 0;
+    for (int i = 0; i < o.n; i++) {
+        long m = (long)(o.t[i] / 60) - M0;
+        if (m == 90)  ok_old = fabs(o.o[i] - 1090) < 1e-3;           /* only the database has it */
+        if (m == 120) ok_db = fabs(o.o[i] - 1120) < 1e-3;            /* the database and the bins: the database */
+        if (m == 155) ok_bin = fabs(o.o[i] - 3155) < 1e-3;           /* the bins and the ticks, not the database: the bins */
+        if (m == 178) ok_live = fabs(o.o[i] - 228) < 1e-3;           /* the last two minutes: the ticks first, though the bins have it too */
+        if (m == 179) ok_edge = fabs(o.c[i] - 229) < 1e-3;
+    }
+    CHECK("bins: a minute only the database has", ok_old);
+    CHECK("bins: the database over the bins", ok_db);
+    CHECK("bins: the bins over the ticks where the database lacks the minute", ok_bin);
+    CHECK("bins: the ticks at the live edge", ok_live && ok_edge);
+    /* the daemon appends a closed minute: a refresh reads it */
+    f = fopen(pb, "ab");
+    { unsigned char rec[80]; memset(rec, 0, sizeof rec); int64_t ts = (int64_t)(M0 + 178) * 60; double d[8] = { 4000, 4002, 3999, 4001, 5, 0, 0, 0 }; memcpy(rec, &ts, 8); memcpy(rec + 8, d, sizeof d); fwrite(rec, 1, 80, f); }
+    fclose(f);
+    CHECK("bins: refresh", series_refresh(&sb) == 0);
+    int has178 = 0; Series *l2[4] = { NULL, NULL, &sb, NULL };
+    series_queryN(l2, 4, 1, 200, t0 + 180LL * 60000, &o);
+    for (int i = 0; i < o.n; i++) if ((long)(o.t[i] / 60) - M0 == 178) has178 = fabs(o.o[i] - 4000) < 1e-3;
+    CHECK("bins: the appended minute is seen", has178);
+    series_close(&sf); series_close(&sd); series_close(&sb); sqlite3_close(db); unlink(pdb); unlink(pf); unlink(pb);
+}
+
 int main(void)
 {
+    check_bins();
     check_database();
     check_fill();
     check_range();

@@ -542,10 +542,9 @@ static void paint(HDC dc, int W, int H)
         if (A.ind[1]) LINE(ma9, ok9, COL_MA9, PS_SOLID);
         SelectClipRgn(dc, NULL); DeleteObject(clip);
         for (int i = base; i < n; i++) {
-            int cur = i == n - 1;                                   /* the candle still forming: brighter and thicker */
-            COLORREF col = c[i] >= o[i] ? (cur ? RGB(90, 235, 140) : COL_UP) : (cur ? RGB(255, 120, 120) : COL_DOWN);
+            COLORREF col = c[i] >= o[i] ? COL_UP : COL_DOWN;                          /* every candle alike: the one forming is drawn as the others */
             int xs = x0 + (i - base) * step, cx = xs + bw / 2;                        /* the middle pixel of the slot's body */
-            int x = cur ? xs - 1 : xs, w = cur ? bw + 2 : bw;                         /* the forming candle is two pixels wider, still centred on the wick */
+            int x = xs, w = bw;
             rect(dc, cx, Y(h[i]), cx + 1, Y(l[i]) + 1, col);
             int yo = Y(o[i]), yc = Y(c[i]); if (yo > yc) { int tmp = yo; yo = yc; yc = tmp; }
             rect(dc, x, yo, x + w, yc + 1 > yo + 1 ? yc + 1 : yo + 1, col);
