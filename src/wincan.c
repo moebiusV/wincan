@@ -826,6 +826,46 @@ static void commit_edit(void)                     /* Enter, or the mouse leaving
 
 static void quit_app(void) { save_all(); tray_del(); A.quit = 1; wake(); DestroyWindow(A.hwnd); }
 
+/*
+ * Snap a window rectangle that is being dragged to the edges of a screen's usable area when it comes within SNAP pixels of them.  Nothing keeps the window on the
+ * screen: past SNAP pixels beyond an edge it is free again, and it may be partly off the screen.  Left or right, and top or bottom, are each snapped to the nearer.
+ */
+#define SNAP 14
+static void snap_rect(RECT *r, const RECT *work)
+{
+    int w = r->right - r->left, h = r->bottom - r->top;
+    int dl = abs(r->left - work->left), dr = abs(r->right - work->right);
+    if (dl <= SNAP && dl <= dr) { r->left = work->left; r->right = r->left + w; }
+    else if (dr <= SNAP) { r->right = work->right; r->left = r->right - w; }
+    int dt = abs(r->top - work->top), db = abs(r->bottom - work->bottom);
+    if (dt <= SNAP && dt <= db) { r->top = work->top; r->bottom = r->top + h; }
+    else if (db <= SNAP) { r->bottom = work->bottom; r->top = r->bottom - h; }
+}
+
+static int test_snap(const char *file)
+{
+    RECT work = { 0, 0, 1280, 760 };                      /* a screen 1280 x 800 with a taskbar of 40 at the bottom */
+    struct { RECT in, out; const char *what; } T[] = {
+        { { 10, 100, 310, 275 },    { 0, 100, 300, 275 },      "near the left edge: flush with it" },
+        { { 20, 100, 320, 275 },    { 20, 100, 320, 275 },     "far enough from the left edge: left alone" },
+        { { 975, 100, 1275, 275 },  { 980, 100, 1280, 275 },   "near the right edge: flush with it" },
+        { { 1100, 3, 1400, 178 },   { 1100, 0, 1400, 175 },    "near the top, and partly off the right of the screen: snapped at the top only" },
+        { { 500, 580, 800, 755 },   { 500, 585, 800, 760 },    "near the bottom (the taskbar's edge): flush with it" },
+        { { -150, 100, 150, 275 },  { -150, 100, 150, 275 },   "half off the left of the screen: left alone (no clamping)" },
+        { { -5, 100, 295, 275 },    { 0, 100, 300, 275 },      "just past the left edge: back flush with it" },
+        { { 1200, 700, 1500, 875 }, { 1200, 700, 1500, 875 },  "far off the bottom right: left alone" },
+    };
+    FILE *f = fopen(file, "w"); int bad = 0;
+    for (size_t i = 0; i < sizeof T / sizeof T[0]; i++) {
+        RECT r = T[i].in; snap_rect(&r, &work);
+        int ok = r.left == T[i].out.left && r.top == T[i].out.top && r.right == T[i].out.right && r.bottom == T[i].out.bottom;
+        if (!ok) bad++;
+        if (f) fprintf(f, "%s: %s  (%ld,%ld,%ld,%ld)\n", ok ? "ok  " : "FAIL", T[i].what, r.left, r.top, r.right, r.bottom);
+    }
+    if (f) { fprintf(f, "%s\n", bad ? "FAILED" : "ALL OK"); fclose(f); }
+    return bad;
+}
+
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     switch (m) {
@@ -943,6 +983,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             if (cmd == IDM_SHOW) show_hide(A.hidden); else if (cmd == IDM_EXIT) quit_app();
         }
         return 0;
+    case WM_MOVING: {                                           /* being dragged: it snaps to the edges of the usable screen, and goes where it is taken otherwise */
+        RECT *r = (RECT *)l;
+        HMONITOR mon = MonitorFromRect(r, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi; memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi;
+        if (GetMonitorInfo(mon, &mi)) snap_rect(r, &mi.rcWork);
+        return TRUE; }
     case WM_EXITSIZEMOVE: save_all(); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     default:
@@ -978,6 +1024,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
         else if (!strcmp(a, "--shot-active")) A.shot_active = 1;
         else if (!strcmp(a, "--scale") && i + 1 < argc) { A.scale = atoi(nx); i++; }
         else if (!strcmp(a, "--test-close")) A.test_close = 1;
+        else if (!strcmp(a, "--test-snap") && i + 1 < argc) { exit(test_snap(nx) ? 1 : 0); }
         else if (!strcmp(a, "--shot-editor")) A.shot_editor = 1;
         else if (!strcmp(a, "--shot-hover") && i + 1 < argc) { A.hover = atoi(nx); i++; }
         else if (!strcmp(a, "--shot-off") && i + 1 < argc) { A.ind[atoi(nx) % 4] = 0; i++; }
@@ -1003,10 +1050,11 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     A.active = A.shot_active;
     if (A.shot_editor) { A.editing = 1; A.field = 2; snprintf(A.edit[0], sizeof A.edit[0], "61000"); snprintf(A.edit[1], sizeof A.edit[1], "0.5"); snprintf(A.edit[2], sizeof A.edit[2], "10"); snprintf(A.edit[3], sizeof A.edit[3], "-12.5"); }
     int W = win_w(), H = win_h();
-    /* the first time, the top left corner of the screen; a saved place is kept only if the whole window is on a screen (all the monitors count) */
+    /* the first time, the top left corner of the screen; a saved place is kept if a good part of the window can be seen on a screen (all the monitors count) */
     int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN), vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
     int x = GetPrivateProfileIntA("wincan", "x", wa.left + 8, A.ini), y = GetPrivateProfileIntA("wincan", "y", wa.top + 8, A.ini);
-    if (x < vx || y < vy || x + W > vx + vw || y + H > vy + vh) { x = wa.left + 8; y = wa.top + 8; }
+    int seen_w = (x + W < vx + vw ? x + W : vx + vw) - (x > vx ? x : vx), seen_h = (y + H < vy + vh ? y + H : vy + vh) - (y > vy ? y : vy);
+    if (seen_w < 60 || seen_h < 40) { x = wa.left + 8; y = wa.top + 8; }          /* it may be partly off the screen, but not so far that it cannot be found */
     A.hwnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_APPWINDOW | WS_EX_NOACTIVATE, "wincan", "wincan", WS_POPUP, x, y, W, H, NULL, NULL, hi, NULL);
     if (!A.hwnd) return 1;
     tray_add();
