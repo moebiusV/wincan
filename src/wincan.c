@@ -63,6 +63,7 @@ static struct {
     /* ui */
     int    ind[4], hover;                 /* the toggles on/off: Bollinger bands, 9 MA, 200 MA, volume candles; the dot the mouse is over (-1: none) */
     int    active, dragging, editing, tracking, hidden;   /* editing: the position editor is open */
+    POINT  drag_c0; RECT drag_r0;          /* a drag: where the cursor and the window were when the button went down */
     int    field_last;                    /* the box last edited: e resumes there (kept in the settings) */
     int    field, fresh[4];                /* the box being typed in (0 entry price, 1 amount, 2 leverage, 3 realized P&L); a box's first key replaces what it held */
     char   edit[4][32];
@@ -827,32 +828,44 @@ static void commit_edit(void)                     /* Enter, or the mouse leaving
 static void quit_app(void) { save_all(); tray_del(); A.quit = 1; wake(); DestroyWindow(A.hwnd); }
 
 /*
- * Snap a window rectangle that is being dragged to the edges of a screen's usable area when it comes within SNAP pixels of them.  Nothing keeps the window on the
- * screen: past SNAP pixels beyond an edge it is free again, and it may be partly off the screen.  Left or right, and top or bottom, are each snapped to the nearer.
+ * Snap a window rectangle that is being dragged: whenever an edge of the window comes within SNAP pixels of an edge of the screen's usable area, from any direction
+ * (inside or outside), the window is moved so that the two coincide.  The window's left or right edge is matched against the screen's left and right edges, its top or
+ * bottom edge against the screen's top and bottom edges, so it can sit flush inside an edge or flush just outside it; the nearest of the four wins on each axis, the
+ * insides first when equal.  Nothing keeps the window on the screen: past SNAP pixels from an edge it is free, and it may be partly off the screen.
  */
-#define SNAP 14
+#define SNAP 25
+static void snap_axis(LONG *lo, LONG *hi, LONG wlo, LONG whi)
+{
+    LONG best = SNAP + 1, shift = 0, d;
+    d = *lo - wlo; if (labs(d) < best) { best = labs(d); shift = -d; }       /* the window's low edge to the screen's low edge: flush inside */
+    d = *hi - whi; if (labs(d) < best) { best = labs(d); shift = -d; }       /* its high edge to the screen's high edge: flush inside */
+    d = *lo - whi; if (labs(d) < best) { best = labs(d); shift = -d; }       /* its low edge to the screen's high edge: just outside, beyond it */
+    d = *hi - wlo; if (labs(d) < best) { best = labs(d); shift = -d; }       /* its high edge to the screen's low edge: just outside, before it */
+    if (best <= SNAP) { *lo += shift; *hi += shift; }
+}
 static void snap_rect(RECT *r, const RECT *work)
 {
-    int w = r->right - r->left, h = r->bottom - r->top;
-    int dl = abs(r->left - work->left), dr = abs(r->right - work->right);
-    if (dl <= SNAP && dl <= dr) { r->left = work->left; r->right = r->left + w; }
-    else if (dr <= SNAP) { r->right = work->right; r->left = r->right - w; }
-    int dt = abs(r->top - work->top), db = abs(r->bottom - work->bottom);
-    if (dt <= SNAP && dt <= db) { r->top = work->top; r->bottom = r->top + h; }
-    else if (db <= SNAP) { r->bottom = work->bottom; r->top = r->bottom - h; }
+    snap_axis(&r->left, &r->right, work->left, work->right);
+    snap_axis(&r->top, &r->bottom, work->top, work->bottom);
 }
 
 static int test_snap(const char *file)
 {
     RECT work = { 0, 0, 1280, 760 };                      /* a screen 1280 x 800 with a taskbar of 40 at the bottom */
     struct { RECT in, out; const char *what; } T[] = {
-        { { 10, 100, 310, 275 },    { 0, 100, 300, 275 },      "near the left edge: flush with it" },
-        { { 20, 100, 320, 275 },    { 20, 100, 320, 275 },     "far enough from the left edge: left alone" },
-        { { 975, 100, 1275, 275 },  { 980, 100, 1280, 275 },   "near the right edge: flush with it" },
-        { { 1100, 3, 1400, 178 },   { 1100, 0, 1400, 175 },    "near the top, and partly off the right of the screen: snapped at the top only" },
-        { { 500, 580, 800, 755 },   { 500, 585, 800, 760 },    "near the bottom (the taskbar's edge): flush with it" },
+        { { 10, 100, 310, 275 },    { 0, 100, 300, 275 },      "left edge near the screen's left edge: flush inside" },
+        { { 24, 100, 324, 275 },    { 0, 100, 300, 275 },      "24 pixels from it: still snaps (the distance is 25)" },
+        { { 30, 100, 330, 275 },    { 30, 100, 330, 275 },     "30 pixels from it: left alone" },
+        { { 975, 100, 1275, 275 },  { 980, 100, 1280, 275 },   "right edge near the screen's right edge: flush inside" },
+        { { -288, 100, 12, 275 },   { -300, 100, 0, 275 },     "from outside on the left: its right edge to the screen's left edge, parked just outside" },
+        { { 1290, 100, 1590, 275 }, { 1280, 100, 1580, 275 },  "from outside on the right: its left edge to the screen's right edge" },
+        { { 500, 3, 800, 178 },     { 500, 0, 800, 175 },      "top edge near the screen's top: flush inside" },
+        { { 500, 580, 800, 755 },   { 500, 585, 800, 760 },    "bottom edge near the bottom of the usable area (the taskbar): flush inside" },
+        { { 500, -180, 800, -5 },   { 500, -175, 800, 0 },     "from above: its bottom edge to the screen's top edge" },
+        { { 500, 770, 800, 945 },   { 500, 760, 800, 935 },    "from below: its top edge to the screen's bottom edge" },
         { { -150, 100, 150, 275 },  { -150, 100, 150, 275 },   "half off the left of the screen: left alone (no clamping)" },
-        { { -5, 100, 295, 275 },    { 0, 100, 300, 275 },      "just past the left edge: back flush with it" },
+        { { -5, 100, 295, 275 },    { 0, 100, 300, 275 },      "just past the left edge: flush inside" },
+        { { 1100, 3, 1400, 178 },   { 1100, 0, 1400, 175 },    "near the top and partly off the right: snapped at the top only" },
         { { 1200, 700, 1500, 875 }, { 1200, 700, 1500, 875 },  "far off the bottom right: left alone" },
     };
     FILE *f = fopen(file, "w"); int bad = 0;
@@ -900,9 +913,17 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         }
         take_keyboard();
-        A.dragging = 1; ReleaseCapture(); SendMessage(h, WM_NCLBUTTONDOWN, HTCAPTION, 0); A.dragging = 0;       /* a click and drag moves the window */
-        { POINT pt; RECT r; GetCursorPos(&pt); GetWindowRect(h, &r); if (!PtInRect(&r, pt)) give_up_keyboard(); }
+        /* a click and drag moves the window, by a drag of its own and not Windows' move loop: the position is always the window's at the start plus how far the cursor has moved,
+         * with the snap applied to that, so nothing adds up from one step to the next (the system's loop built each position on the last one, and the snapping drifted) */
+        A.dragging = 1; GetCursorPos(&A.drag_c0); GetWindowRect(h, &A.drag_r0); SetCapture(h);
         return 0;
+    case WM_LBUTTONUP:
+        if (A.dragging) {
+            A.dragging = 0; ReleaseCapture(); save_all();
+            { POINT pt; RECT r; GetCursorPos(&pt); GetWindowRect(h, &r); if (!PtInRect(&r, pt)) give_up_keyboard(); }
+        }
+        return 0;
+    case WM_CAPTURECHANGED: A.dragging = 0; return 0;
     case WM_RBUTTONUP: {
         POINT pt; GetCursorPos(&pt);
         HMENU mn = CreatePopupMenu();
@@ -914,6 +935,15 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (cmd == IDM_SHOW) show_hide(0); else if (cmd == IDM_EXIT) quit_app();
         return 0; }
     case WM_MOUSEMOVE: {
+        if (A.dragging) {
+            if (!(w & MK_LBUTTON)) { A.dragging = 0; ReleaseCapture(); return 0; }
+            POINT pt; GetCursorPos(&pt);
+            RECT r = A.drag_r0; OffsetRect(&r, pt.x - A.drag_c0.x, pt.y - A.drag_c0.y);
+            MONITORINFO mi; memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi;
+            if (GetMonitorInfo(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mi)) snap_rect(&r, &mi.rcWork);
+            SetWindowPos(h, NULL, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            return 0;
+        }
         int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = win_w(), H = win_h(), hv = -1; double u = W / (double)BASE_W;
         for (int k = 0; k < 4; k++) { int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r); if (abs(mx - cx) <= r + 3 && abs(my - cy) <= r + 3) hv = k; }
         if (hv != A.hover) { A.hover = hv; InvalidateRect(h, NULL, FALSE); }
@@ -983,12 +1013,6 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             if (cmd == IDM_SHOW) show_hide(A.hidden); else if (cmd == IDM_EXIT) quit_app();
         }
         return 0;
-    case WM_MOVING: {                                           /* being dragged: it snaps to the edges of the usable screen, and goes where it is taken otherwise */
-        RECT *r = (RECT *)l;
-        HMONITOR mon = MonitorFromRect(r, MONITOR_DEFAULTTONEAREST);
-        MONITORINFO mi; memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi;
-        if (GetMonitorInfo(mon, &mi)) snap_rect(r, &mi.rcWork);
-        return TRUE; }
     case WM_EXITSIZEMOVE: save_all(); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     default:
