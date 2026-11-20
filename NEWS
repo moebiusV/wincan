@@ -23,3 +23,5 @@ wincan 0.1.0 (2026-11-20)
   Dragging: the window may be taken partly off the screen, and snaps flush to an edge of the usable screen within 14 pixels of it.
   Dragging: wincan does its own drag (no drift); any edge of the window snaps to any edge of the usable screen within 25 pixels, from inside or outside.
   The snap distance is 20 pixels (25 was tried).
+  The snap distance is 10 pixels, which scales with the screen's scaling (15 physical pixels at 150%).
+  The snap distance is 12 pixels at 100% scaling (18 physical pixels at 150%).

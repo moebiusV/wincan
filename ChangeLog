@@ -18,3 +18,5 @@
 2026-11-20  Snap to the screen edges when dragged; no clamping.
 2026-11-20  Own drag loop (the system's drifted with the snapping); snap of all four window edges to all four screen edges, 25 pixels.
 2026-11-20  Snap distance 20 pixels.
+2026-11-20  Snap distance 10 pixels (15 physical at 150% scaling).
+2026-11-20  Snap distance 12 (18 physical pixels at 150%).

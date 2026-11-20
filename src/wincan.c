@@ -833,7 +833,9 @@ static void quit_app(void) { save_all(); tray_del(); A.quit = 1; wake(); Destroy
  * bottom edge against the screen's top and bottom edges, so it can sit flush inside an edge or flush just outside it; the nearest of the four wins on each axis, the
  * insides first when equal.  Nothing keeps the window on the screen: past SNAP pixels from an edge it is free, and it may be partly off the screen.
  */
-#define SNAP 20
+/* 12 at 100% scaling (the usual snap distances are 8 to 20, 10 the commonest).  wincan is not DPI-aware, so Windows scales every coordinate it sees by the screen's scaling: 12 here is
+ * 18 physical pixels at 150%, 24 at 200%: the distance scales with the screen by itself (a second scaling in the code would double it). */
+#define SNAP 12
 static void snap_axis(LONG *lo, LONG *hi, LONG wlo, LONG whi)
 {
     LONG best = SNAP + 1, shift = 0, d;
@@ -853,11 +855,11 @@ static int test_snap(const char *file)
 {
     RECT work = { 0, 0, 1280, 760 };                      /* a screen 1280 x 800 with a taskbar of 40 at the bottom */
     struct { RECT in, out; const char *what; } T[] = {
-        { { 10, 100, 310, 275 },    { 0, 100, 300, 275 },      "left edge near the screen's left edge: flush inside" },
-        { { 20, 100, 320, 275 },    { 0, 100, 300, 275 },      "20 pixels from it: still snaps (the distance is 20)" },
-        { { 21, 100, 321, 275 },    { 21, 100, 321, 275 },     "21 pixels from it: left alone" },
+        { { 4, 100, 304, 275 },     { 0, 100, 300, 275 },      "left edge near the screen's left edge: flush inside" },
+        { { 12, 100, 312, 275 },    { 0, 100, 300, 275 },      "12 pixels from it: still snaps (the distance is 12)" },
+        { { 13, 100, 313, 275 },    { 13, 100, 313, 275 },     "13 pixels from it: left alone" },
         { { 975, 100, 1275, 275 },  { 980, 100, 1280, 275 },   "right edge near the screen's right edge: flush inside" },
-        { { -288, 100, 12, 275 },   { -300, 100, 0, 275 },     "from outside on the left: its right edge to the screen's left edge, parked just outside" },
+        { { -292, 100, 8, 275 },    { -300, 100, 0, 275 },     "from outside on the left: its right edge to the screen's left edge, parked just outside" },
         { { 1290, 100, 1590, 275 }, { 1280, 100, 1580, 275 },  "from outside on the right: its left edge to the screen's right edge" },
         { { 500, 3, 800, 178 },     { 500, 0, 800, 175 },      "top edge near the screen's top: flush inside" },
         { { 500, 580, 800, 755 },   { 500, 585, 800, 760 },    "bottom edge near the bottom of the usable area (the taskbar): flush inside" },
