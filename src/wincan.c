@@ -13,6 +13,8 @@
 #include <winhttp.h>
 #include <shellapi.h>
 #include <stdio.h>
+#include <ctype.h>
+#include "gomatch.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -68,6 +70,9 @@ static struct {
     int    field_last;                    /* the box last edited: e resumes there (kept in the settings) */
     int    field, fresh[4];                /* the box being typed in (0 entry price, 1 amount, 2 leverage, 3 realized P&L); a box's first key replaces what it held */
     char   edit[4][32];
+    int    cur[4];                         /* the caret of each box: left and right move it, a key goes in at it (a minus in front of a number, say) */
+    int    go_on, go_cur, go_sel; char go_buf[24];     /* the 'g' box: a ticker typed with auto-complete; the caret in it; the suggestion chosen */
+    int    shot_go;
     HWND   prev;                         /* the window that had the keyboard before a click */
     char   ini[MAX_PATH], logpath[MAX_PATH];
     volatile int close_req;              /* x was pressed: the worker closes the trade at the mark */
@@ -499,6 +504,8 @@ static const char *IND_NAME[4] = { "Bollinger bands (20, 2)", "9-period moving a
 /* the centre of the dot of an indicator, and its radius, in a window W by H at the factor u */
 static void dot_pos(int k, int W, int H, double u, int *cx, int *cy, int *r) { *cx = W - (int)(14 * u) - k * (int)(13 * u); *cy = H - (int)(8 * u); *r = (int)(3.5 * u + 0.5); }
 
+static int go_matches(int out[5]);
+
 /* ---- the heat strip: the modelled liquidations, left = longs liquidated (price falling), right = shorts (price rising), the centre = where we are now.
  * One bar per percentage point from the price, twenty a side (the author, 2026-11-20), the nearest next to the centre.  A bar's height is the square
  * root of the liquidation notional of its percentage point (the biggest bar of the pair fills the strip); its brightness is the pressure, the
@@ -695,10 +702,37 @@ static void paint(HDC dc, int W, int H)
             int bx0 = U(118), bx1 = W - U(10);
             rect(dc, bx0, ry, bx1, ry + U(17), k == A.field ? RGB(40, 48, 60) : RGB(28, 34, 43));
             if (k == A.field) { HPEN pn = CreatePen(PS_SOLID, 1, COL_ENTRY); HGDIOBJ op = SelectObject(dc, pn), ob = SelectObject(dc, GetStockObject(NULL_BRUSH)); Rectangle(dc, bx0, ry, bx1, ry + U(17)); SelectObject(dc, op); SelectObject(dc, ob); DeleteObject(pn); }
-            snprintf(buf, sizeof buf, "%s%s", A.edit[k], k == A.field ? "_" : "");
-            text(dc, fn, COL_TXT, bx0 + U(4), ry + U(1), buf, 0);
+            text(dc, fn, COL_TXT, bx0 + U(4), ry + U(1), A.edit[k], 0);
+            if (k == A.field) {                                            /* the caret, where the next key goes in */
+                SIZE sz = { 0, 0 }; HGDIOBJ of = SelectObject(dc, fn); int cc = A.cur[k] < (int)strlen(A.edit[k]) ? A.cur[k] : (int)strlen(A.edit[k]);
+                if (cc > 0) GetTextExtentPoint32A(dc, A.edit[k], cc, &sz);
+                SelectObject(dc, of); rect(dc, bx0 + U(4) + sz.cx, ry + U(2), bx0 + U(4) + sz.cx + 1, ry + U(15), COL_ENTRY);
+            }
         }
-        text(dc, fs, COL_DIM, U(8), y0 + U(4) + 4 * U(19) + U(2), "Tab: next   Enter or mouse out: done   Esc: cancel", 0);
+        text(dc, fs, COL_DIM, U(8), y0 + U(4) + 4 * U(19) + U(2), "Tab: next  arrows: move  Enter or mouse out: done  Esc: cancel", 0);
+    } else if (A.go_on) {                                        /* the 'g' box: a ticker with auto-complete; Tab completes, Up and Down choose, Enter goes */
+        int y0 = H - U(98), m[5], nm = go_matches(m);
+        rect(dc, 0, y0, W, H, RGB(20, 25, 33));
+        { HPEN pn = CreatePen(PS_SOLID, 1, RGB(70, 80, 95)); HGDIOBJ op = SelectObject(dc, pn); MoveToEx(dc, 0, y0, NULL); LineTo(dc, W, y0); SelectObject(dc, op); DeleteObject(pn); }
+        text(dc, fn, COL_ENTRY, U(8), y0 + U(5), "Go to", 0);
+        int bx0 = U(60), bx1 = W - U(10);
+        rect(dc, bx0, y0 + U(4), bx1, y0 + U(21), RGB(40, 48, 60));
+        { HPEN pn = CreatePen(PS_SOLID, 1, COL_ENTRY); HGDIOBJ op = SelectObject(dc, pn), ob = SelectObject(dc, GetStockObject(NULL_BRUSH)); Rectangle(dc, bx0, y0 + U(4), bx1, y0 + U(21)); SelectObject(dc, op); SelectObject(dc, ob); DeleteObject(pn); }
+        text(dc, fn, COL_TXT, bx0 + U(4), y0 + U(5), A.go_buf, 0);
+        { SIZE sz = { 0, 0 }; HGDIOBJ of = SelectObject(dc, fn); int len = (int)strlen(A.go_buf), cc = A.go_cur < len ? A.go_cur : len, full = 0;
+          if (cc > 0) GetTextExtentPoint32A(dc, A.go_buf, cc, &sz);
+          if (nm && !strncmp(A.pairs[m[A.go_sel < nm ? A.go_sel : 0]], A.go_buf, (size_t)len) && len) {              /* the rest of the chosen suggestion, dimmed, after the typed letters */
+              SIZE s2; const char *rest = A.pairs[m[A.go_sel < nm ? A.go_sel : 0]] + len; GetTextExtentPoint32A(dc, A.go_buf, len, &s2); full = s2.cx;
+              SelectObject(dc, of); text(dc, fn, COL_DIM, bx0 + U(4) + full, y0 + U(5), rest, 0); of = SelectObject(dc, fn);
+          }
+          SelectObject(dc, of); rect(dc, bx0 + U(4) + sz.cx, y0 + U(6), bx0 + U(4) + sz.cx + 1, y0 + U(19), COL_ENTRY); }
+        for (int k = 0; k < nm; k++) {
+            int ry = y0 + U(25) + k * U(13); int sel = k == (A.go_sel < nm ? A.go_sel : 0);
+            if (sel) rect(dc, U(8), ry, W - U(10), ry + U(12), RGB(40, 48, 60));
+            text(dc, fn, sel ? COL_ENTRY : COL_TXT, U(14), ry, A.pairs[m[k]], 0);
+        }
+        if (!nm) text(dc, fn, COL_DOWN, U(14), y0 + U(25), A.go_buf[0] ? "no such pair" : "type a ticker", 0);
+        text(dc, fs, COL_DIM, U(8), H - U(11), "Tab: complete  Up/Down: choose  Enter: go  Esc: cancel", 0);
     } else if (pos.entry > 0 && pos.size != 0 && n > 0) {
         Fig fg = figures(&pos, pnl_price);                       /* as KuCoin's panel: the unrealized profit and its return on the initial margin (value / leverage); the realized is shown apart */
         double usd = fg.unreal, pct = fg.pct_unreal;
@@ -706,7 +740,7 @@ static void paint(HDC dc, int W, int H)
         snprintf(buf, sizeof buf, "%+.2f%%", pct); fmt_money(usd, buf2, sizeof buf2);
         text(dc, fp, col, U(6), fy, buf, 0);
         text(dc, fp, col, W - U(6), fy, buf2, 1);
-        if (A.active) text(dc, fs, COL_DIM, U(6), fy + U(22), "up/down time  left/right coin  e position  x close  q quit", 0);
+        if (A.active) text(dc, fs, COL_DIM, U(6), fy + U(22), "up/dn time  </> coin  e position  g go to  x close  q quit", 0);
         else {
             fmt_price(pos.entry, buf, sizeof buf);
             char lv[16] = "", rl[48] = "";
@@ -806,7 +840,7 @@ static void take_keyboard(void)
 static void give_up_keyboard(void)
 {
     if (!A.active) return;
-    A.active = 0; A.editing = 0;
+    A.active = 0; A.editing = 0; A.go_on = 0;
     set_passive(1);
     if (A.prev && IsWindow(A.prev) && IsWindowVisible(A.prev) && !IsIconic(A.prev)) SetForegroundWindow(A.prev);
     A.prev = NULL;
@@ -888,11 +922,26 @@ static void open_editor(void)
     Position *p = cur_pos();
     A.editing = 1; A.field = A.field_last >= 0 && A.field_last < 4 ? A.field_last : 0;     /* resume where the last edit was */
     for (int k = 0; k < 4; k++) { A.fresh[k] = 1; A.edit[k][0] = 0; }
+    A.go_on = 0;
     if (p->entry > 0) snprintf(A.edit[0], sizeof A.edit[0], "%.10g", p->entry);
     if (p->size != 0) snprintf(A.edit[1], sizeof A.edit[1], "%.10g", p->size);
     if (p->leverage > 0) snprintf(A.edit[2], sizeof A.edit[2], "%.10g", p->leverage);
     if (p->realized != 0) snprintf(A.edit[3], sizeof A.edit[3], "%.10g", p->realized);
+    for (int k = 0; k < 4; k++) A.cur[k] = (int)strlen(A.edit[k]);
     InvalidateRect(A.hwnd, NULL, FALSE);
+}
+
+/* ---- the 'g' box: the pairs that match what has been typed, the exact one first, then those that begin with it, then those that contain it (at most five) ---- */
+static int go_matches(int out[5]) { return go_match((const char (*)[24])A.pairs, A.npairs, A.go_buf, out); }
+
+static void goto_pair(const char *name)
+{
+    EnterCriticalSection(&A.cs);
+    snprintf(A.pair, sizeof A.pair, "%s", name);
+    show_cached();
+    LeaveCriticalSection(&A.cs);
+    A.go_on = 0;
+    save_all(); wake(); InvalidateRect(A.hwnd, NULL, FALSE);
 }
 
 static void commit_edit(void)                     /* Enter, or the mouse leaving: all the boxes; a box left empty keeps what it held (type 0 to clear a number) */
@@ -1043,15 +1092,34 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (A.hover != -1) { A.hover = -1; InvalidateRect(h, NULL, FALSE); }
         if (A.active && !A.dragging) {                                              /* the mouse out of the window: it gives the keyboard back at once, */
             if (A.editing) commit_edit();                                           /* and that, like Enter, means the position has been entered */
+            A.go_on = 0;
             give_up_keyboard();
         }
         return 0;
-    case WM_KILLFOCUS: if (A.active && !A.dragging) { A.active = 0; A.editing = 0; set_passive(1); InvalidateRect(h, NULL, FALSE); } return 0;
+    case WM_KILLFOCUS: if (A.active && !A.dragging) { A.active = 0; A.editing = 0; A.go_on = 0; set_passive(1); InvalidateRect(h, NULL, FALSE); } return 0;
     case WM_KEYDOWN:
+        if (A.go_on) {                                                              /* the 'g' box */
+            int m[5], nm = go_matches(m), len = (int)strlen(A.go_buf);
+            if (w == VK_ESCAPE) A.go_on = 0;
+            else if (w == VK_LEFT) { if (A.go_cur > 0) A.go_cur--; }
+            else if (w == VK_RIGHT) { if (A.go_cur < len) A.go_cur++; }
+            else if (w == VK_HOME) A.go_cur = 0;
+            else if (w == VK_END) A.go_cur = len;
+            else if (w == VK_DELETE) { if (A.go_cur < len) { memmove(A.go_buf + A.go_cur, A.go_buf + A.go_cur + 1, (size_t)(len - A.go_cur)); A.go_sel = 0; } }
+            else if (w == VK_DOWN) { if (nm) A.go_sel = (A.go_sel + 1) % nm; }
+            else if (w == VK_UP) { if (nm) A.go_sel = (A.go_sel + nm - 1) % nm; }
+            InvalidateRect(h, NULL, FALSE); return 0;
+        }
         if (A.editing) {
+            char *e = A.edit[A.field]; int len = (int)strlen(e);
             if (w == VK_ESCAPE) A.editing = 0;
             else if (w == VK_DOWN) { A.field = (A.field + 1) % 4; A.field_last = A.field; }
             else if (w == VK_UP) { A.field = (A.field + 3) % 4; A.field_last = A.field; }
+            else if (w == VK_LEFT) { A.fresh[A.field] = 0; if (A.cur[A.field] > 0) A.cur[A.field]--; }          /* the arrows edit what is there instead of replacing it */
+            else if (w == VK_RIGHT) { A.fresh[A.field] = 0; if (A.cur[A.field] < len) A.cur[A.field]++; }
+            else if (w == VK_HOME) { A.fresh[A.field] = 0; A.cur[A.field] = 0; }
+            else if (w == VK_END) { A.fresh[A.field] = 0; A.cur[A.field] = len; }
+            else if (w == VK_DELETE) { A.fresh[A.field] = 0; if (A.cur[A.field] < len) memmove(e + A.cur[A.field], e + A.cur[A.field] + 1, (size_t)(len - A.cur[A.field])); }
             InvalidateRect(h, NULL, FALSE); return 0;
         }
         switch (w) {
@@ -1064,14 +1132,25 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         return 0;
     case WM_CHAR:
+        if (A.go_on) {                                                              /* the 'g' box: letters and digits go in at the caret; Tab completes; Enter goes */
+            int m[5], nm = go_matches(m), len = (int)strlen(A.go_buf);
+            if (w == '\r') { if (nm) goto_pair(A.pairs[m[A.go_sel < nm ? A.go_sel : 0]]); }
+            else if (w == '\t') { if (nm) { snprintf(A.go_buf, sizeof A.go_buf, "%s", A.pairs[m[A.go_sel < nm ? A.go_sel : 0]]); A.go_cur = (int)strlen(A.go_buf); A.go_sel = 0; } }
+            else if (w == '\b') { if (A.go_cur > 0) { memmove(A.go_buf + A.go_cur - 1, A.go_buf + A.go_cur, (size_t)(len - A.go_cur + 1)); A.go_cur--; A.go_sel = 0; } }
+            else if ((w >= '0' && w <= '9') || (w >= 'A' && w <= 'Z') || (w >= 'a' && w <= 'z')) {
+                if (len < (int)sizeof A.go_buf - 1) { memmove(A.go_buf + A.go_cur + 1, A.go_buf + A.go_cur, (size_t)(len - A.go_cur + 1)); A.go_buf[A.go_cur++] = (char)toupper((int)w); A.go_sel = 0; }
+            }
+            InvalidateRect(h, NULL, FALSE);
+            return 0;
+        }
         if (A.editing) {
-            char *e = A.edit[A.field]; size_t n = strlen(e);
+            char *e = A.edit[A.field]; int n = (int)strlen(e), *cu = &A.cur[A.field];
             if (w == '\r') { commit_edit(); return 0; }
             else if (w == '\t') { A.field = (A.field + 1) % 4; A.field_last = A.field; }
-            else if (w == '\b') { A.fresh[A.field] = 0; if (n) e[n - 1] = 0; }
+            else if (w == '\b') { A.fresh[A.field] = 0; if (*cu > 0) { memmove(e + *cu - 1, e + *cu, (size_t)(n - *cu + 1)); (*cu)--; } }
             else if ((w >= '0' && w <= '9') || w == '.' || w == '-' || w == ',') {
-                if (A.fresh[A.field]) { e[0] = 0; n = 0; A.fresh[A.field] = 0; }      /* the first key replaces what the box held */
-                if (n < sizeof A.edit[0] - 1) { e[n] = w == ',' ? '.' : (char)w; e[n + 1] = 0; }
+                if (A.fresh[A.field]) { e[0] = 0; n = 0; *cu = 0; A.fresh[A.field] = 0; }      /* the first key replaces what the box held */
+                if (n < (int)sizeof A.edit[0] - 1) { memmove(e + *cu + 1, e + *cu, (size_t)(n - *cu + 1)); e[(*cu)++] = w == ',' ? '.' : (char)w; }      /* in at the caret */
             }
             InvalidateRect(h, NULL, FALSE);
             return 0;
@@ -1080,6 +1159,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         case 'q': case 'Q': quit_app(); break;
         case 'x': case 'X': { Position *p = cur_pos(); if (p->entry > 0 && p->size != 0) { A.close_req = 1; wake(); } break; }       /* close the trade at the mark, and log it */
         case 'e': case 'E': open_editor(); break;
+        case 'g': case 'G': A.go_on = 1; A.go_buf[0] = 0; A.go_cur = 0; A.go_sel = 0; InvalidateRect(h, NULL, FALSE); break;       /* go straight to a ticker */
         case 't': case 'T': show_hide(0); break;
         case '+': case '=': if (A.scale < 400) { A.scale += 25; resize_window(); save_all(); wake(); } break;
         case '-': if (A.scale > 75) { A.scale -= 25; resize_window(); save_all(); wake(); } break;
@@ -1137,6 +1217,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
         else if (!strcmp(a, "--shot") && i + 1 < argc) { static char shot[260]; snprintf(shot, sizeof shot, "%s", nx); A.shot = shot; i++; }
         else if (!strcmp(a, "--shot-position") && i + 1 < argc) { sscanf(nx, "%lf,%lf,%lf,%lf", &A.shot_entry, &A.shot_size, &A.shot_lev, &A.shot_real); i++; }
         else if (!strcmp(a, "--shot-active")) A.shot_active = 1;
+        else if (!strcmp(a, "--shot-go") && i + 1 < argc) { snprintf(A.go_buf, sizeof A.go_buf, "%s", nx); A.go_cur = (int)strlen(A.go_buf); A.shot_go = 1; i++; }
         else if (!strcmp(a, "--scale") && i + 1 < argc) { A.scale = atoi(nx); i++; }
         else if (!strcmp(a, "--test-close")) A.test_close = 1;
         else if (!strcmp(a, "--test-snap") && i + 1 < argc) { exit(test_snap(nx) ? 1 : 0); }
@@ -1163,6 +1244,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     RegisterClassA(&wc);
     RECT wa; SystemParametersInfo(SPI_GETWORKAREA, 0, &wa, 0);
     A.active = A.shot_active;
+    if (A.shot_go) A.go_on = 1;
     if (A.shot_editor) { A.editing = 1; A.field = 2; snprintf(A.edit[0], sizeof A.edit[0], "61000"); snprintf(A.edit[1], sizeof A.edit[1], "0.5"); snprintf(A.edit[2], sizeof A.edit[2], "10"); snprintf(A.edit[3], sizeof A.edit[3], "-12.5"); }
     int W = win_w(), H = win_h();
     /* the first time, the top left corner of the screen; a saved place is kept if a good part of the window can be seen on a screen (all the monitors count) */

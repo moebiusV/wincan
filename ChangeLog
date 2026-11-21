@@ -33,3 +33,5 @@
 2026-11-20  heat strip: the net-skew ball, (shorts - longs) / (shorts + longs) across the half strip.
 
 2026-11-20  heat strip: colours by side (longs, left, green; shorts, right, red) and the labels L and S at the ends.
+
+2026-11-20  wincan.c: a caret in the position boxes (Left, Right, Home, End, Delete; a key goes in at the caret, so a minus can be put in front of a number); the g key opens a go-to box with auto-complete (src/gomatch.h, tests/test_go.c): Tab completes, Up and Down choose, Enter goes to the pair.

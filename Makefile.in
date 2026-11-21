@@ -11,7 +11,7 @@ HASWIN    = @HASWIN@
 CFLAGS   ?= -O2
 WARN      = -std=gnu11 -Wall -Wextra -DPACKAGE_VERSION='"$(VERSION)"'
 DISTFILES = AUTHORS COPYING ChangeLog INSTALL NEWS README VERSION configure Makefile.in \
-            src/agg.c src/agg.h src/heat.c src/heat.h src/candled.c src/wincan.c tests/test_agg.c tests/test_heat.c \
+            src/agg.c src/agg.h src/heat.c src/heat.h src/gomatch.h src/candled.c src/wincan.c tests/test_agg.c tests/test_heat.c tests/test_go.c \
             man/candled.8 man/wincan.1 man/wincan.5 contrib/candled.service
 
 TARGETS = candled
@@ -24,7 +24,7 @@ all: $(TARGETS)
 candled: src/candled.c src/agg.c src/agg.h src/heat.c src/heat.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ src/candled.c src/agg.c src/heat.c -lsqlite3 -lcurl -lpthread -lm
 
-wincan.exe: src/wincan.c
+wincan.exe: src/wincan.c src/gomatch.h
 	$(WINCC) $(CFLAGS) $(WARN) -mwindows -o $@ src/wincan.c -lgdi32 -lwinhttp -lshell32 -luser32 -lws2_32
 
 win: wincan.exe
@@ -35,9 +35,13 @@ test_agg: tests/test_agg.c src/agg.c src/agg.h
 test_heat: tests/test_heat.c src/heat.c src/heat.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ tests/test_heat.c src/heat.c -lm
 
-check: test_agg test_heat
+test_go: tests/test_go.c src/gomatch.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ tests/test_go.c
+
+check: test_agg test_heat test_go
 	./test_agg
 	./test_heat
+	./test_go
 
 install: all
 	install -d $(DESTDIR)$(sbindir) $(DESTDIR)$(bindir) $(DESTDIR)$(mandir)/man8 $(DESTDIR)$(mandir)/man1 $(DESTDIR)$(mandir)/man5
@@ -65,7 +69,7 @@ dist: $(DISTFILES)
 	rm -rf $(PACKAGE)-$(VERSION)
 
 clean:
-	rm -f candled wincan.exe test_agg test_heat
+	rm -f candled wincan.exe test_agg test_heat test_go
 
 distclean: clean
 	rm -f Makefile $(PACKAGE)-*.tar.gz
