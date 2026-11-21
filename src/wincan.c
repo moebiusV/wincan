@@ -533,12 +533,14 @@ static void draw_heat(HDC dc, int W, int y0, int y1, double u, HFONT fs)
             int h = (int)(hm * sqrt(v / mx) + 0.5); if (h < 1 && v > 0) h = 1;
             double b = 0.35 + 0.65 * (log10(1 + pr) / log10(26.0)); if (b > 1) b = 1;       /* pressure of 25 times the depth or more: full brightness */
             if (stale) b *= 0.5;
-            COLORREF col = mixc(side ? COL_UP : COL_DOWN, COL_BG, b);
+            COLORREF col = mixc(side ? COL_DOWN : COL_UP, COL_BG, b);                 /* by side, as a trader reads it: longs (left) green, shorts (right) red (the author, 2026-11-20) */
             int xa = side ? x0 + U(2) + (int)(i * sw) : x0 - U(2) - (int)((i + 1) * sw), xb = xa + (int)(sw + 0.5) - 1; if (xb <= xa) xb = xa + 1;
             rect(dc, xa, yb - h, xb, yb, col);
         }
     }
     rect(dc, U(2), yb, W - U(2), yb + 1, RGB(60, 70, 82));                       /* the baseline */
+    text(dc, fs, RGB(10, 12, 16), U(4) + 1, y0 + U(2) + 1, "L", 0); text(dc, fs, RGB(225, 230, 236), U(4), y0 + U(2), "L", 0);                       /* the two sides, named: longs liquidated on the left, shorts on the right */
+    text(dc, fs, RGB(10, 12, 16), W - U(4) + 1, y0 + U(2) + 1, "S", 1); text(dc, fs, RGB(225, 230, 236), W - U(4), y0 + U(2), "S", 1);
     rect(dc, x0, y0 + U(2), x0 + 1, y1 - U(1), COL_TXT);                         /* now */
     { POINT tri[3] = { { x0 - U(3), y0 + 1 }, { x0 + U(3) + 1, y0 + 1 }, { x0, y0 + U(4) } }; HBRUSH br = CreateSolidBrush(COL_TXT); HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, GetStockObject(NULL_PEN)); Polygon(dc, tri, 3); SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(br); }
     int yc = (y0 + y1) / 2 + U(1), r = U(3);

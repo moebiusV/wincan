@@ -31,3 +31,5 @@
 2026-11-20  heat strip: one bar per percentage point (20 a side); /heat serves the cohort ladder (heat2) with the order-book pressure.
 
 2026-11-20  heat strip: the net-skew ball, (shorts - longs) / (shorts + longs) across the half strip.
+
+2026-11-20  heat strip: colours by side (longs, left, green; shorts, right, red) and the labels L and S at the ends.
