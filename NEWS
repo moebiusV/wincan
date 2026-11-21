@@ -27,3 +27,4 @@ wincan 0.1.0 (2026-11-20)
   The snap distance is 12 pixels at 100% scaling (18 physical pixels at 150%).
   The snap distance is 11 pixels at 100% scaling (about 17 physical pixels at 150%).
   wincan reconnects by itself after the computer suspends and resumes.
+  The heat strip along the bottom of wincan: modelled long and short liquidations at 1, 2, 5, 10 and 20 per cent, with the centre of gravity (two ways).

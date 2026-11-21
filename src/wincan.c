@@ -33,6 +33,7 @@
 #define MAX_PAIRS   512
 #define BASE_W      300
 #define BASE_H      175
+#define HEAT_H      25         /* the heat strip along the bottom, in program pixels (the author, 2026-11-20: 25 vertical pixels) */
 
 static const char *TFS[] = { "1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w" };
 #define NTF 9
@@ -72,6 +73,7 @@ static struct {
     volatile int close_req;              /* x was pressed: the worker closes the trade at the mark */
     struct { int valid; DWORD when; double pct, usd, mfe, mae; char pair[24]; } last;     /* the trade closed last, shown for a while */
     const char *shot; int shot_done; double shot_entry, shot_size, shot_lev, shot_real; int shot_active, shot_editor, test_close;
+    struct { int ok; DWORD when; double L[5], S[5], pl[5], ps[5], cog, cogn, oi, ls, book_age; char pair[24]; } heat;     /* the modelled liquidation ladder of the pair, from /heat */
     UINT   taskbar_created;
     HICON  icon;
 } A;
@@ -426,6 +428,20 @@ static DWORD WINAPI worker(LPVOID arg)
                   if (rb) { EnterCriticalSection(&A.cs); pi = pair_index(pair); if (pi >= 0) parse_range(rb, &A.pos[pi]); LeaveCriticalSection(&A.cs); free(rb); }
               }
           } }
+        { static DWORD last_heat; static char heat_for[24]; DWORD t3 = GetTickCount();       /* the liquidation ladder: every ten seconds, at once when the pair changes */
+          if (t3 - last_heat > 10000 || strcmp(heat_for, pair)) {
+              last_heat = t3; snprintf(heat_for, sizeof heat_for, "%s", pair);
+              char hp[96]; snprintf(hp, sizeof hp, "/heat?pair=%s", pair);
+              char *hb = http_get(hp);
+              EnterCriticalSection(&A.cs);
+              if (hb && strstr(hb, "\"cog\"")) {
+                  A.heat.ok = 1; A.heat.when = t3; snprintf(A.heat.pair, sizeof A.heat.pair, "%s", pair);
+                  get_arr(hb, "L", A.heat.L, 5); get_arr(hb, "S", A.heat.S, 5); get_arr(hb, "pl", A.heat.pl, 5); get_arr(hb, "ps", A.heat.ps, 5);
+                  A.heat.cog = get_num(hb, "cog"); A.heat.cogn = get_num(hb, "cogn"); A.heat.oi = get_num(hb, "oi_usd"); A.heat.ls = get_num(hb, "ls"); A.heat.book_age = get_num(hb, "book_age_s");
+              } else if (strcmp(A.heat.pair, pair)) A.heat.ok = 0;                 /* another pair, and nothing for it: no strip rather than the old pair's */
+              LeaveCriticalSection(&A.cs);
+              free(hb);
+          } }
         PostMessage(A.hwnd, WM_DATA, 0, 0);
         WaitForSingleObject(A.wake, 1000);
     }
@@ -483,11 +499,75 @@ static const char *IND_NAME[4] = { "Bollinger bands (20, 2)", "9-period moving a
 /* the centre of the dot of an indicator, and its radius, in a window W by H at the factor u */
 static void dot_pos(int k, int W, int H, double u, int *cx, int *cy, int *r) { *cx = W - (int)(14 * u) - k * (int)(13 * u); *cy = H - (int)(8 * u); *r = (int)(3.5 * u + 0.5); }
 
+/* ---- the heat strip: the modelled liquidations, left = longs liquidated (price falling), right = shorts (price rising), the centre = where we are now.
+ * Five bars a side at 1, 2, 5, 10 and 20 per cent from the price (the author's levels), the nearest next to the centre.  A bar's height is the square
+ * root of the liquidation notional of its tier (the biggest bar of the pair fills the strip); its brightness is the pressure, the liquidations up to
+ * that distance over the order-book depth that must absorb them.  Two balls ride on the strip at the centres of gravity: the white one is the plain
+ * mass-weighted position, the gold ring the Newtonian one (each cluster weighted by mass over distance squared), both at their per cent from the price
+ * on the strip's own axis, as the lines of the chart place the price between the highest high and the lowest low. */
+static COLORREF mixc(COLORREF base, COLORREF bg, double t)
+{
+    return RGB((int)(GetRValue(bg) + (GetRValue(base) - GetRValue(bg)) * t), (int)(GetGValue(bg) + (GetGValue(base) - GetGValue(bg)) * t), (int)(GetBValue(bg) + (GetBValue(base) - GetBValue(bg)) * t));
+}
+
+/* a distance in per cent from the price to a distance in slot widths: the bars sit at 0.5, 1.5, 2.5, 3.5, 4.5 for 1, 2, 5, 10, 20 per cent */
+static double heat_slots(double d)
+{
+    static const double K[6][2] = { { 0, 0 }, { 1, 0.5 }, { 2, 1.5 }, { 5, 2.5 }, { 10, 3.5 }, { 20, 4.5 } };
+    double s = d < 0 ? -d : d; int i;
+    if (s >= 20) s = 20;
+    for (i = 1; i < 5 && s > K[i][0]; i++) ;
+    double v = K[i - 1][1] + (s - K[i - 1][0]) / (K[i][0] - K[i - 1][0]) * (K[i][1] - K[i - 1][1]);
+    return d < 0 ? -v : v;
+}
+
+static void draw_heat(HDC dc, int W, int y0, int y1, double u, HFONT fs)
+{
+    #define U(v) ((int)((v) * u + 0.5))
+    double L[5], S[5], pl[5], ps[5], cog, cogn; int ok; DWORD when;
+    EnterCriticalSection(&A.cs);
+    ok = A.heat.ok; when = A.heat.when; cog = A.heat.cog; cogn = A.heat.cogn;
+    memcpy(L, A.heat.L, sizeof L); memcpy(S, A.heat.S, sizeof S); memcpy(pl, A.heat.pl, sizeof pl); memcpy(ps, A.heat.ps, sizeof ps);
+    LeaveCriticalSection(&A.cs);
+    rect(dc, 0, y0, W, y1, COL_BG);
+    rect(dc, 0, y0, W, y0 + 1, RGB(36, 44, 54));
+    if (!ok) { text(dc, fs, COL_DIM, W / 2, y0 + U(8), "no liquidation data for this pair", 2); return; }
+    int stale = GetTickCount() - when > 40000;
+    int x0 = W / 2, yb = y1 - U(3), hm = (y1 - y0) - U(7);
+    double sw = (W / 2.0 - U(5)) / 5.0, mx = 1;
+    for (int i = 0; i < 5; i++) { if (L[i] > mx) mx = L[i]; if (S[i] > mx) mx = S[i]; }
+    for (int side = 0; side < 2; side++) {
+        for (int i = 0; i < 5; i++) {
+            double v = side ? S[i] : L[i], pr = side ? ps[i] : pl[i];
+            int h = (int)(hm * sqrt(v / mx) + 0.5); if (h < 1 && v > 0) h = 1;
+            double b = 0.35 + 0.65 * (log10(1 + pr) / log10(26.0)); if (b > 1) b = 1;       /* pressure of 25 times the depth or more: full brightness */
+            if (stale) b *= 0.5;
+            COLORREF col = mixc(side ? COL_UP : COL_DOWN, COL_BG, b);
+            int xa = side ? x0 + U(2) + (int)(i * sw) : x0 - U(2) - (int)((i + 1) * sw) + U(3), xb = xa + (int)sw - U(3);
+            rect(dc, xa, yb - h, xb, yb, col);
+        }
+    }
+    rect(dc, U(2), yb, W - U(2), yb + 1, RGB(60, 70, 82));                       /* the baseline */
+    rect(dc, x0, y0 + U(2), x0 + 1, y1 - U(1), COL_TXT);                         /* now */
+    { POINT tri[3] = { { x0 - U(3), y0 + 1 }, { x0 + U(3) + 1, y0 + 1 }, { x0, y0 + U(4) } }; HBRUSH br = CreateSolidBrush(COL_TXT); HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, GetStockObject(NULL_PEN)); Polygon(dc, tri, 3); SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(br); }
+    int yc = (y0 + y1) / 2 + U(1), r = U(3);
+    for (int k = 0; k < 2; k++) {                                               /* 0: the plain average, a white ball; 1: the Newtonian, a gold ring */
+        double c = k ? cogn : cog; int cx = x0 + (int)(heat_slots(c) * sw);
+        HPEN pn = CreatePen(PS_SOLID, 1, k ? COL_ENTRY : RGB(20, 24, 30)); HBRUSH br = k ? (HBRUSH)GetStockObject(NULL_BRUSH) : CreateSolidBrush(RGB(250, 250, 250));
+        HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, pn);
+        if (k) { HPEN dark = CreatePen(PS_SOLID, 3, RGB(20, 24, 30)); SelectObject(dc, dark); Ellipse(dc, cx - r, yc - r, cx + r + 1, yc + r + 1); SelectObject(dc, pn); DeleteObject(dark); }
+        Ellipse(dc, cx - r, yc - r, cx + r + 1, yc + r + 1);
+        SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(pn); if (!k) DeleteObject(br);
+    }
+    #undef U
+}
+
 static void paint(HDC dc, int W, int H)
 {
     double u = W / (double)BASE_W;                         /* scale factor */
     #define U(v) ((int)((v) * u + 0.5))
     rect(dc, 0, 0, W, H, COL_BG);
+    const int Hf = H; H -= U(HEAT_H);                      /* everything above lays out in the core window; the strip is the last HEAT_H pixels */
     HFONT fb = font(U(13), 1), fn = font(U(11), 0), fs = font(U(9), 0), fp = font(U(15), 1), fx = font(U(12), 1);      /* fx: the high and low labels (the author, 2026-11-20: too small and faint to read) */
 
     EnterCriticalSection(&A.cs);
@@ -662,15 +742,17 @@ static void paint(HDC dc, int W, int H)
     }
     if (A.active) {                                              /* the window has the keyboard */
         HPEN pen = CreatePen(PS_SOLID, 1, RGB(70, 130, 200)); HGDIOBJ oldp = SelectObject(dc, pen), oldb = SelectObject(dc, GetStockObject(NULL_BRUSH));
-        Rectangle(dc, 0, 0, W, H); SelectObject(dc, oldp); SelectObject(dc, oldb); DeleteObject(pen);
+        Rectangle(dc, 0, 0, W, Hf); SelectObject(dc, oldp); SelectObject(dc, oldb); DeleteObject(pen);
     }
+    draw_heat(dc, W, H, Hf, u, fs);
     DeleteObject(fb); DeleteObject(fn); DeleteObject(fs); DeleteObject(fp); DeleteObject(fx); DeleteObject(fx);
     #undef U
     #undef Y
 }
 
 static int win_w(void) { return BASE_W * A.scale / 100; }
-static int win_h(void) { return BASE_H * A.scale / 100; }
+static int win_h(void) { return (BASE_H + HEAT_H) * A.scale / 100; }
+static int core_h(void) { return BASE_H * A.scale / 100; }          /* the window without the heat strip */
 
 static int save_bmp(const char *file, int W, int H)
 {
@@ -911,7 +993,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         return 0;
     case WM_MOUSEACTIVATE: return A.active ? MA_ACTIVATE : MA_NOACTIVATE;
     case WM_LBUTTONDOWN: {
-        int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = win_w(), H = win_h(); double u = W / (double)BASE_W;
+        int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = win_w(), H = core_h(); double u = W / (double)BASE_W;
         for (int k = 0; k < 4; k++) {                                          /* a click on a dot toggles it */
             int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r);
             if (abs(mx - cx) <= r + 3 && abs(my - cy) <= r + 3) { A.ind[k] = !A.ind[k]; save_all(); InvalidateRect(h, NULL, FALSE); return 0; }
@@ -949,7 +1031,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             SetWindowPos(h, NULL, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             return 0;
         }
-        int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = win_w(), H = win_h(), hv = -1; double u = W / (double)BASE_W;
+        int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = win_w(), H = core_h(), hv = -1; double u = W / (double)BASE_W;
         for (int k = 0; k < 4; k++) { int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r); if (abs(mx - cx) <= r + 3 && abs(my - cy) <= r + 3) hv = k; }
         if (hv != A.hover) { A.hover = hv; InvalidateRect(h, NULL, FALSE); }
         }

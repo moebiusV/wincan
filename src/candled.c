@@ -2,6 +2,7 @@
  * candled -- a small read-only HTTP server that serves candles, as JSON, from the raw .bin files of a collector.
  *
  *   GET /pairs                              ["BTC","ETH",...]            (recently written files first)
+ *   GET /heat?pair=BTC                      the modelled liquidation ladder (heat.h) from a liquidation-map database (--heat-db)
  *   GET /candles?pair=BTC&tf=5m&n=60        {"pair":..,"tf":..,"price":..,"age_ms":..,"complete":..,"t":[..],"o":[..],...}
  *
  * See candled(8).
@@ -25,8 +26,10 @@
 #include <arpa/inet.h>
 #include <sqlite3.h>
 #include <curl/curl.h>
+#include "heat.h"
 
 #define MAX_PAIRS 512
+static const char *heatdb = NULL;      /* a liquidation-map database: order-book bands, open interest and long/short ratios, for /heat */
 static const char *dir = ".", *dir2 = NULL, *dbpath = NULL, *binsdir = NULL;      /* the files of the live collector, the backfill files (spot), and the database whose candles table is authoritative */
 /* the sources of a coin, in order: the live files (100 ms ticks), the database, the websocket daemon's bins (closed minutes), the backfill files */
 #define NSRC 5
@@ -355,6 +358,53 @@ static void respond(int fd, int code, const char *status, const char *body, int 
     for (int off = 0; off < len; ) { ssize_t w = write(fd, body + off, (size_t)(len - off)); if (w <= 0) return; off += (int)w; }
 }
 
+/* GET /heat?pair=ZEC: the modelled liquidation ladder of heat.h from the newest rows of a liquidation-map database.  Returns the JSON length, or 0 with *code set. */
+static int heat_json(const char *pair, char *body, size_t cap, int *code)
+{
+    char sym[48];
+    snprintf(sym, sizeof sym, "%sUSDTM", !strcmp(pair, "BTC") ? "XBT" : pair);
+    sqlite3 *db = NULL; sqlite3_stmt *st = NULL; HeatIn in; HeatOut o; memset(&in, 0, sizeof in);
+    double mid = 0, mark = 0, bcov = 0, acov = 0; long long ts_band = 0, ts_oi = 0, ts_ls = 0; int have_oi = 0, have_band = 0;
+    *code = 503;
+    if (!heatdb) return 0;
+    if (sqlite3_open_v2(heatdb, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) { sqlite3_close(db); return 0; }
+    sqlite3_busy_timeout(db, 3000);
+    if (sqlite3_prepare_v2(db, "SELECT ts, oi_usd, mark FROM oi WHERE pair=?1 ORDER BY ts DESC LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, sym, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) { ts_oi = sqlite3_column_int64(st, 0); in.oi_usd = sqlite3_column_double(st, 1); mark = sqlite3_column_double(st, 2); have_oi = 1; }
+        sqlite3_finalize(st);
+    }
+    if (sqlite3_prepare_v2(db, "SELECT ts, global_ls FROM bn WHERE pair=?1 AND global_ls IS NOT NULL ORDER BY ts DESC LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, sym, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) { ts_ls = sqlite3_column_int64(st, 0); in.ls = sqlite3_column_double(st, 1); }
+        sqlite3_finalize(st);
+    }
+    if (sqlite3_prepare_v2(db, "SELECT ts, mid, bid_cov, ask_cov, b1, b2, b5, b10, b20, a1, a2, a5, a10, a20 FROM book_bands WHERE pair=?1 ORDER BY ts DESC LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, sym, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            ts_band = sqlite3_column_int64(st, 0); mid = sqlite3_column_double(st, 1); bcov = sqlite3_column_double(st, 2); acov = sqlite3_column_double(st, 3);
+            for (int i = 0; i < HEAT_N; i++) { in.bid[i] = sqlite3_column_double(st, 4 + i); in.ask[i] = sqlite3_column_double(st, 9 + i); }
+            have_band = 1;
+        }
+        sqlite3_finalize(st);
+    }
+    sqlite3_close(db);
+    if (!have_oi) { *code = 404; return 0; }
+    heat_model(&in, &o);
+    long long now = (long long)time(NULL);
+    int n = snprintf(body, cap, "{\"pair\":\"%s\",\"sym\":\"%s\",\"age_s\":%lld,\"book_age_s\":%lld,\"ls_age_s\":%lld,\"mark\":%.8g,\"mid\":%.8g,\"oi_usd\":%.6g,\"ls\":%.4f,"
+                     "\"bid_cov\":%.2f,\"ask_cov\":%.2f,\"cog\":%.4f,\"cogn\":%.4f,", pair, sym, now - ts_oi, have_band ? now - ts_band : -1, ts_ls ? now - ts_ls : -1,
+                     mark, mid, in.oi_usd, in.ls > 0 ? in.ls : 1.0, bcov, acov, o.cog_lin, o.cog_newton);
+    const char *nm[4] = { "L", "S", "pl", "ps" }; const double *v[4] = { o.liq_long, o.liq_short, o.press_long, o.press_short };
+    for (int k = 0; k < 4; k++) {
+        n += snprintf(body + n, cap - (size_t)n, "\"%s\":[", nm[k]);
+        for (int i = 0; i < HEAT_N; i++) n += snprintf(body + n, cap - (size_t)n, "%s%.6g", i ? "," : "", v[k][i]);
+        n += snprintf(body + n, cap - (size_t)n, "]%s", k < 3 ? "," : "}");
+    }
+    *code = 200;
+    return n;
+}
+
 /* one request; returns 1 to keep the connection for the next */
 static int handle(int fd, char *body, size_t bodycap, Out *out)
 {
@@ -401,6 +451,16 @@ static int handle(int fd, char *body, size_t bodycap, Out *out)
         respond(fd, 200, "OK", body, o);
         return 1;
     }
+    if (!strcmp(path, "/heat")) {
+        char pair[40] = ""; int code = 0;
+        qparam(q, "pair", pair, sizeof pair);
+        if (!valid_pair(pair)) { respond(fd, 400, "Bad Request", "{\"error\":\"pair wrong\"}", 23); return 1; }
+        int n = heat_json(pair, body, bodycap, &code);
+        if (code == 200) respond(fd, 200, "OK", body, n);
+        else if (code == 404) respond(fd, 404, "Not Found", "{\"error\":\"no heat data for this pair\"}", 36);
+        else respond(fd, 503, "Service Unavailable", "{\"error\":\"heat not configured or unreadable\"}", 43);
+        return 1;
+    }
     if (!strcmp(path, "/range")) {
         char pair[40] = "", ss[24] = "0";
         qparam(q, "pair", pair, sizeof pair); qparam(q, "since", ss, sizeof ss);
@@ -443,11 +503,12 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--backfill") && i + 1 < argc) dir2 = argv[++i];
         else if (!strcmp(argv[i], "--db") && i + 1 < argc) dbpath = argv[++i];
         else if (!strcmp(argv[i], "--live-bins") && i + 1 < argc) binsdir = argv[++i];
+        else if (!strcmp(argv[i], "--heat-db") && i + 1 < argc) heatdb = argv[++i];
         else if (!strcmp(argv[i], "--official-klines")) rest_enabled = 1;
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bind") && i + 1 < argc) bind_addr = argv[++i];
         else if (!strcmp(argv[i], "--version")) { puts("candled " PACKAGE_VERSION); return 0; }
-        else { fprintf(stderr, "usage: candled --dir DIR [--db FILE] [--live-bins DIR] [--official-klines] [--backfill DIR] [--port N] [--bind ADDR]\n"); return 2; }
+        else { fprintf(stderr, "usage: candled --dir DIR [--db FILE] [--live-bins DIR] [--heat-db FILE] [--official-klines] [--backfill DIR] [--port N] [--bind ADDR]\n"); return 2; }
     }
     signal(SIGPIPE, SIG_IGN);
     int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
