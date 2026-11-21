@@ -85,3 +85,5 @@ the centre line is the present price.  One bar per percentage point from the pri
 square root of its liquidation notional (the biggest bar of the pair fills the strip); its brightness is the pressure on the order book.  The white ball is the centre of gravity as a plain mass-weighted average, the gold ring
 the Newtonian one (each cluster weighted by mass over distance squared); each sits at its per cent from the price on the strip's linear axis (20 per cent at the edge).
 The data come from the server's /heat (see candled(8)).
+The cyan ball is the net skew, (shorts \- longs) / (shorts + longs) of the whole ladder, placed across the half strip: at an edge when one side has everything to lose, in the centre when the two sides are even.
+It answers who has more to lose, which the two centres of gravity, the mean of two piles on either side of the price, mostly cancel.

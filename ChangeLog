@@ -29,3 +29,5 @@
 2026-11-20  heat strip: candled serves GET /heat?pair=ZEC (--heat-db: a liquidation-map database), the modelled liquidation ladder of src/heat.c; wincan draws it in a strip of 25 program pixels along the bottom (the window is now 300x200): bars at 1, 2, 5, 10 and 20 per cent, longs on the left, shorts on the right, now in the centre, and two balls at the centres of gravity (plain average, white; Newtonian, gold ring).  tests/test_heat.c.
 
 2026-11-20  heat strip: one bar per percentage point (20 a side); /heat serves the cohort ladder (heat2) with the order-book pressure.
+
+2026-11-20  heat strip: the net-skew ball, (shorts - longs) / (shorts + longs) across the half strip.

@@ -504,7 +504,9 @@ static void dot_pos(int k, int W, int H, double u, int *cx, int *cy, int *r) { *
  * root of the liquidation notional of its percentage point (the biggest bar of the pair fills the strip); its brightness is the pressure, the
  * liquidations up to that distance over the order-book depth that must absorb them.  Two balls ride on the strip at the centres of gravity: the white one is
  * the plain mass-weighted position, the gold ring the Newtonian one (each level weighted by mass over distance squared), each at its per cent from the price on
- * the strip's own linear axis (20 per cent at the edge), as the lines of the chart place the price between the highest high and the lowest low. */
+ * the strip's own linear axis (20 per cent at the edge).  The cyan ball is the NET SKEW, (shorts - longs) / (shorts + longs) of the whole ladder, placed across the half
+ * strip (all the way to an edge when one side has everything to lose): it answers who has more to lose, where the two averages above, being the mean of two piles
+ * on either side of the price, mostly cancel (the author's request, 2026-11-20).  It rides as the chart's lines place the price between the highest high and the lowest low. */
 static COLORREF mixc(COLORREF base, COLORREF bg, double t)
 {
     return RGB((int)(GetRValue(bg) + (GetRValue(base) - GetRValue(bg)) * t), (int)(GetGValue(bg) + (GetGValue(base) - GetGValue(bg)) * t), (int)(GetBValue(bg) + (GetBValue(base) - GetBValue(bg)) * t));
@@ -540,6 +542,13 @@ static void draw_heat(HDC dc, int W, int y0, int y1, double u, HFONT fs)
     rect(dc, x0, y0 + U(2), x0 + 1, y1 - U(1), COL_TXT);                         /* now */
     { POINT tri[3] = { { x0 - U(3), y0 + 1 }, { x0 + U(3) + 1, y0 + 1 }, { x0, y0 + U(4) } }; HBRUSH br = CreateSolidBrush(COL_TXT); HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, GetStockObject(NULL_PEN)); Polygon(dc, tri, 3); SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(br); }
     int yc = (y0 + y1) / 2 + U(1), r = U(3);
+    { double sl = 0, ss = 0; for (int i = 0; i < 20; i++) { sl += L[i]; ss += S[i]; }
+      if (sl + ss > 0) {                                                        /* the net skew: a cyan ball, across the whole half strip */
+          double sk = (ss - sl) / (sl + ss); int cx = x0 + (int)(sk * (W / 2.0 - U(6)));
+          HPEN pn = CreatePen(PS_SOLID, 1, RGB(10, 60, 80)); HBRUSH br = CreateSolidBrush(RGB(60, 200, 240)); HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, pn);
+          Ellipse(dc, cx - r - 1, yc - r - 1, cx + r + 2, yc + r + 2);
+          SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(pn); DeleteObject(br);
+      } }
     for (int k = 0; k < 2; k++) {                                               /* 0: the plain average, a white ball; 1: the Newtonian, a gold ring */
         double c = k ? cogn : cog; if (c > 20) c = 20; if (c < -20) c = -20;
         int cx = x0 + (int)(c * sw);
