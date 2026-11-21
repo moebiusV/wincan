@@ -10,3 +10,5 @@ Restart=on-failure
 
 [Install]
 WantedBy=default.target
+
+# also: --heat-db FILE  (the liquidation ladder for wincan's heat strip)
