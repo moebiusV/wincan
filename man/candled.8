@@ -112,9 +112,10 @@ Bars older than the last interruption of the collector have their order and shap
 .BR wincan (5)
 .SH LIQUIDATION LADDER
 .B GET /heat?pair=ZEC
-returns the modelled liquidation ladder of a pair from a liquidation-map database, named with
+returns the modelled liquidation ladder of a pair, one bucket per percentage point from the price (0 to 1 per cent up to 19 to 20), longs below the price (L), shorts above (S),
+from a liquidation-map database, named with
 .BR \-\-heat\-db .
-The open interest is split between longs and shorts by Binance's account long/short ratio; five leverage tiers (about 100, 50, 20, 10 and 5 times) are assumed
-to hold 10, 15, 25, 30 and 20 per cent of each side, liquidating about 1, 2, 5, 10 and 20 per cent from the price (longs below, shorts above).  The answer has the
-notional of each tier (L, S), the pressure (the liquidations up to that distance over the order-book depth that must absorb them: pl, ps), and the centre of gravity as
-a per cent from the price: cog, the mass-weighted mean, and cogn, each cluster weighted by mass over distance squared.  The tier shares are an assumption, not data.
+The database's builder makes the ladder from the open-interest history of Binance, Hyperliquid and KuCoin: every increase is a cohort of positions opened at that price, spread over assumed
+leverage tiers, and a tier the price has since reached is gone.  The pressure (pl, ps) is made here: the liquidations up to a distance over the order-book depth to the same distance.
+cog is the centre of gravity as a per cent from the price, the mass-weighted mean; cogn weights each level by mass over distance squared.  Without a ladder in the database
+a simple five-tier model stands in.  The leverage mix and the maintenance margin are assumptions, not data.

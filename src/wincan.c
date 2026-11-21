@@ -73,7 +73,7 @@ static struct {
     volatile int close_req;              /* x was pressed: the worker closes the trade at the mark */
     struct { int valid; DWORD when; double pct, usd, mfe, mae; char pair[24]; } last;     /* the trade closed last, shown for a while */
     const char *shot; int shot_done; double shot_entry, shot_size, shot_lev, shot_real; int shot_active, shot_editor, test_close;
-    struct { int ok; DWORD when; double L[5], S[5], pl[5], ps[5], cog, cogn, oi, ls, book_age; char pair[24]; } heat;     /* the modelled liquidation ladder of the pair, from /heat */
+    struct { int ok; DWORD when; double L[20], S[20], pl[20], ps[20], cog, cogn, oi, ls, book_age; char pair[24]; } heat;     /* the modelled liquidation ladder of the pair, from /heat */
     UINT   taskbar_created;
     HICON  icon;
 } A;
@@ -436,7 +436,7 @@ static DWORD WINAPI worker(LPVOID arg)
               EnterCriticalSection(&A.cs);
               if (hb && strstr(hb, "\"cog\"")) {
                   A.heat.ok = 1; A.heat.when = t3; snprintf(A.heat.pair, sizeof A.heat.pair, "%s", pair);
-                  get_arr(hb, "L", A.heat.L, 5); get_arr(hb, "S", A.heat.S, 5); get_arr(hb, "pl", A.heat.pl, 5); get_arr(hb, "ps", A.heat.ps, 5);
+                  get_arr(hb, "L", A.heat.L, 20); get_arr(hb, "S", A.heat.S, 20); get_arr(hb, "pl", A.heat.pl, 20); get_arr(hb, "ps", A.heat.ps, 20);
                   A.heat.cog = get_num(hb, "cog"); A.heat.cogn = get_num(hb, "cogn"); A.heat.oi = get_num(hb, "oi_usd"); A.heat.ls = get_num(hb, "ls"); A.heat.book_age = get_num(hb, "book_age_s");
               } else if (strcmp(A.heat.pair, pair)) A.heat.ok = 0;                 /* another pair, and nothing for it: no strip rather than the old pair's */
               LeaveCriticalSection(&A.cs);
@@ -500,31 +500,20 @@ static const char *IND_NAME[4] = { "Bollinger bands (20, 2)", "9-period moving a
 static void dot_pos(int k, int W, int H, double u, int *cx, int *cy, int *r) { *cx = W - (int)(14 * u) - k * (int)(13 * u); *cy = H - (int)(8 * u); *r = (int)(3.5 * u + 0.5); }
 
 /* ---- the heat strip: the modelled liquidations, left = longs liquidated (price falling), right = shorts (price rising), the centre = where we are now.
- * Five bars a side at 1, 2, 5, 10 and 20 per cent from the price (the author's levels), the nearest next to the centre.  A bar's height is the square
- * root of the liquidation notional of its tier (the biggest bar of the pair fills the strip); its brightness is the pressure, the liquidations up to
- * that distance over the order-book depth that must absorb them.  Two balls ride on the strip at the centres of gravity: the white one is the plain
- * mass-weighted position, the gold ring the Newtonian one (each cluster weighted by mass over distance squared), both at their per cent from the price
- * on the strip's own axis, as the lines of the chart place the price between the highest high and the lowest low. */
+ * One bar per percentage point from the price, twenty a side (the author, 2026-11-20), the nearest next to the centre.  A bar's height is the square
+ * root of the liquidation notional of its percentage point (the biggest bar of the pair fills the strip); its brightness is the pressure, the
+ * liquidations up to that distance over the order-book depth that must absorb them.  Two balls ride on the strip at the centres of gravity: the white one is
+ * the plain mass-weighted position, the gold ring the Newtonian one (each level weighted by mass over distance squared), each at its per cent from the price on
+ * the strip's own linear axis (20 per cent at the edge), as the lines of the chart place the price between the highest high and the lowest low. */
 static COLORREF mixc(COLORREF base, COLORREF bg, double t)
 {
     return RGB((int)(GetRValue(bg) + (GetRValue(base) - GetRValue(bg)) * t), (int)(GetGValue(bg) + (GetGValue(base) - GetGValue(bg)) * t), (int)(GetBValue(bg) + (GetBValue(base) - GetBValue(bg)) * t));
 }
 
-/* a distance in per cent from the price to a distance in slot widths: the bars sit at 0.5, 1.5, 2.5, 3.5, 4.5 for 1, 2, 5, 10, 20 per cent */
-static double heat_slots(double d)
-{
-    static const double K[6][2] = { { 0, 0 }, { 1, 0.5 }, { 2, 1.5 }, { 5, 2.5 }, { 10, 3.5 }, { 20, 4.5 } };
-    double s = d < 0 ? -d : d; int i;
-    if (s >= 20) s = 20;
-    for (i = 1; i < 5 && s > K[i][0]; i++) ;
-    double v = K[i - 1][1] + (s - K[i - 1][0]) / (K[i][0] - K[i - 1][0]) * (K[i][1] - K[i - 1][1]);
-    return d < 0 ? -v : v;
-}
-
 static void draw_heat(HDC dc, int W, int y0, int y1, double u, HFONT fs)
 {
     #define U(v) ((int)((v) * u + 0.5))
-    double L[5], S[5], pl[5], ps[5], cog, cogn; int ok; DWORD when;
+    double L[20], S[20], pl[20], ps[20], cog, cogn; int ok; DWORD when;
     EnterCriticalSection(&A.cs);
     ok = A.heat.ok; when = A.heat.when; cog = A.heat.cog; cogn = A.heat.cogn;
     memcpy(L, A.heat.L, sizeof L); memcpy(S, A.heat.S, sizeof S); memcpy(pl, A.heat.pl, sizeof pl); memcpy(ps, A.heat.ps, sizeof ps);
@@ -534,16 +523,16 @@ static void draw_heat(HDC dc, int W, int y0, int y1, double u, HFONT fs)
     if (!ok) { text(dc, fs, COL_DIM, W / 2, y0 + U(8), "no liquidation data for this pair", 2); return; }
     int stale = GetTickCount() - when > 40000;
     int x0 = W / 2, yb = y1 - U(3), hm = (y1 - y0) - U(7);
-    double sw = (W / 2.0 - U(5)) / 5.0, mx = 1;
-    for (int i = 0; i < 5; i++) { if (L[i] > mx) mx = L[i]; if (S[i] > mx) mx = S[i]; }
+    double sw = (W / 2.0 - U(4)) / 20.0, mx = 1;                                  /* the width of a percentage point */
+    for (int i = 0; i < 20; i++) { if (L[i] > mx) mx = L[i]; if (S[i] > mx) mx = S[i]; }
     for (int side = 0; side < 2; side++) {
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 20; i++) {
             double v = side ? S[i] : L[i], pr = side ? ps[i] : pl[i];
             int h = (int)(hm * sqrt(v / mx) + 0.5); if (h < 1 && v > 0) h = 1;
             double b = 0.35 + 0.65 * (log10(1 + pr) / log10(26.0)); if (b > 1) b = 1;       /* pressure of 25 times the depth or more: full brightness */
             if (stale) b *= 0.5;
             COLORREF col = mixc(side ? COL_UP : COL_DOWN, COL_BG, b);
-            int xa = side ? x0 + U(2) + (int)(i * sw) : x0 - U(2) - (int)((i + 1) * sw) + U(3), xb = xa + (int)sw - U(3);
+            int xa = side ? x0 + U(2) + (int)(i * sw) : x0 - U(2) - (int)((i + 1) * sw), xb = xa + (int)(sw + 0.5) - 1; if (xb <= xa) xb = xa + 1;
             rect(dc, xa, yb - h, xb, yb, col);
         }
     }
@@ -552,7 +541,8 @@ static void draw_heat(HDC dc, int W, int y0, int y1, double u, HFONT fs)
     { POINT tri[3] = { { x0 - U(3), y0 + 1 }, { x0 + U(3) + 1, y0 + 1 }, { x0, y0 + U(4) } }; HBRUSH br = CreateSolidBrush(COL_TXT); HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, GetStockObject(NULL_PEN)); Polygon(dc, tri, 3); SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(br); }
     int yc = (y0 + y1) / 2 + U(1), r = U(3);
     for (int k = 0; k < 2; k++) {                                               /* 0: the plain average, a white ball; 1: the Newtonian, a gold ring */
-        double c = k ? cogn : cog; int cx = x0 + (int)(heat_slots(c) * sw);
+        double c = k ? cogn : cog; if (c > 20) c = 20; if (c < -20) c = -20;
+        int cx = x0 + (int)(c * sw);
         HPEN pn = CreatePen(PS_SOLID, 1, k ? COL_ENTRY : RGB(20, 24, 30)); HBRUSH br = k ? (HBRUSH)GetStockObject(NULL_BRUSH) : CreateSolidBrush(RGB(250, 250, 250));
         HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, pn);
         if (k) { HPEN dark = CreatePen(PS_SOLID, 3, RGB(20, 24, 30)); SelectObject(dc, dark); Ellipse(dc, cx - r, yc - r, cx + r + 1, yc + r + 1); SelectObject(dc, pn); DeleteObject(dark); }

@@ -81,7 +81,7 @@ settings; see
 .BR wincan (5)
 .SH HEAT STRIP
 The last 25 pixels of the window show the modelled liquidations of the pair: left of the centre, longs liquidated as the price falls; right, shorts liquidated as it rises;
-the centre line is the present price.  Five bars a side stand for 1, 2, 5, 10 and 20 per cent from the price, the nearest next to the centre.  A bar's height is the
-square root of its liquidation notional; its brightness is the pressure on the order book.  The white ball is the centre of gravity as a plain mass-weighted average, the gold ring
-the Newtonian one (each cluster weighted by mass over distance squared); each sits at its distance from the price on the strip's own axis.
+the centre line is the present price.  One bar per percentage point from the price, twenty a side, the nearest next to the centre.  A bar's height is the
+square root of its liquidation notional (the biggest bar of the pair fills the strip); its brightness is the pressure on the order book.  The white ball is the centre of gravity as a plain mass-weighted average, the gold ring
+the Newtonian one (each cluster weighted by mass over distance squared); each sits at its per cent from the price on the strip's linear axis (20 per cent at the edge).
 The data come from the server's /heat (see candled(8)).

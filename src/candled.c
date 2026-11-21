@@ -358,13 +358,27 @@ static void respond(int fd, int code, const char *status, const char *body, int 
     for (int off = 0; off < len; ) { ssize_t w = write(fd, body + off, (size_t)(len - off)); if (w <= 0) return; off += (int)w; }
 }
 
-/* GET /heat?pair=ZEC: the modelled liquidation ladder of heat.h from the newest rows of a liquidation-map database.  Returns the JSON length, or 0 with *code set. */
+/* GET /heat?pair=ZEC: the modelled liquidation ladder, one bucket per percentage point (0-1 .. 19-20 per cent from the price), longs below, shorts above.
+ * The ladder itself is the database's (the table heat2: the cohort model over Binance's, Hyperliquid's and KuCoin's open-interest history); the pressure is
+ * made here from the newest order-book bands (the liquidations up to a distance over the bid, for longs, or ask, for shorts, depth to that distance,
+ * the depth between the bands' distances 1 2 5 10 20 per cent read off linearly).  Without a heat2 row the simple five-tier model of heat.h stands in. */
+#define HB 20
+static double depth_at(const double *cum, double d)       /* cumulative depth at d per cent, from the values at 1 2 5 10 20 */
+{
+    static const double X[6] = { 0, 1, 2, 5, 10, 20 };
+    double y[6]; y[0] = 0; for (int i = 0; i < 5; i++) y[i + 1] = cum[i];
+    for (int i = 1; i < 6; i++) if (d <= X[i]) return y[i - 1] + (d - X[i - 1]) / (X[i] - X[i - 1]) * (y[i] - y[i - 1]);
+    return y[5];
+}
+static int parse_csv(const char *s, double *dst, int max) { int n = 0; while (s && *s && n < max) { char *e; dst[n++] = strtod(s, &e); if (e == s) break; s = *e == ',' ? e + 1 : e; } return n; }
+
 static int heat_json(const char *pair, char *body, size_t cap, int *code)
 {
     char sym[48];
     snprintf(sym, sizeof sym, "%sUSDTM", !strcmp(pair, "BTC") ? "XBT" : pair);
     sqlite3 *db = NULL; sqlite3_stmt *st = NULL; HeatIn in; HeatOut o; memset(&in, 0, sizeof in);
-    double mid = 0, mark = 0, bcov = 0, acov = 0; long long ts_band = 0, ts_oi = 0, ts_ls = 0; int have_oi = 0, have_band = 0;
+    double LL[HB] = { 0 }, SS[HB] = { 0 }, cog = 0, cogn = 0, price = 0, mid = 0, bcov = 0, acov = 0, mark = 0;
+    long long ts_h = 0, ts_band = 0, ts_oi = 0; int have_oi = 0, have_band = 0, have_h = 0; char src[96] = "simple";
     *code = 503;
     if (!heatdb) return 0;
     if (sqlite3_open_v2(heatdb, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) { sqlite3_close(db); return 0; }
@@ -376,7 +390,7 @@ static int heat_json(const char *pair, char *body, size_t cap, int *code)
     }
     if (sqlite3_prepare_v2(db, "SELECT ts, global_ls FROM bn WHERE pair=?1 AND global_ls IS NOT NULL ORDER BY ts DESC LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_text(st, 1, sym, -1, SQLITE_STATIC);
-        if (sqlite3_step(st) == SQLITE_ROW) { ts_ls = sqlite3_column_int64(st, 0); in.ls = sqlite3_column_double(st, 1); }
+        if (sqlite3_step(st) == SQLITE_ROW) in.ls = sqlite3_column_double(st, 1);
         sqlite3_finalize(st);
     }
     if (sqlite3_prepare_v2(db, "SELECT ts, mid, bid_cov, ask_cov, b1, b2, b5, b10, b20, a1, a2, a5, a10, a20 FROM book_bands WHERE pair=?1 ORDER BY ts DESC LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
@@ -388,17 +402,35 @@ static int heat_json(const char *pair, char *body, size_t cap, int *code)
         }
         sqlite3_finalize(st);
     }
+    if (sqlite3_prepare_v2(db, "SELECT ts, price, cog, cogn, liq_long, liq_short, src FROM heat2 WHERE pair=?1", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, sym, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            ts_h = sqlite3_column_int64(st, 0); price = sqlite3_column_double(st, 1); cog = sqlite3_column_double(st, 2); cogn = sqlite3_column_double(st, 3);
+            parse_csv((const char *)sqlite3_column_text(st, 4), LL, HB); parse_csv((const char *)sqlite3_column_text(st, 5), SS, HB);
+            snprintf(src, sizeof src, "%s", sqlite3_column_text(st, 6) ? (const char *)sqlite3_column_text(st, 6) : ""); have_h = 1;
+        }
+        sqlite3_finalize(st);
+    }
     sqlite3_close(db);
     if (!have_oi) { *code = 404; return 0; }
-    heat_model(&in, &o);
     long long now = (long long)time(NULL);
-    int n = snprintf(body, cap, "{\"pair\":\"%s\",\"sym\":\"%s\",\"age_s\":%lld,\"book_age_s\":%lld,\"ls_age_s\":%lld,\"mark\":%.8g,\"mid\":%.8g,\"oi_usd\":%.6g,\"ls\":%.4f,"
-                     "\"bid_cov\":%.2f,\"ask_cov\":%.2f,\"cog\":%.4f,\"cogn\":%.4f,", pair, sym, now - ts_oi, have_band ? now - ts_band : -1, ts_ls ? now - ts_ls : -1,
-                     mark, mid, in.oi_usd, in.ls > 0 ? in.ls : 1.0, bcov, acov, o.cog_lin, o.cog_newton);
-    const char *nm[4] = { "L", "S", "pl", "ps" }; const double *v[4] = { o.liq_long, o.liq_short, o.press_long, o.press_short };
+    if (!have_h || now - ts_h > 600) {                        /* no ladder (or an old one): the simple model, its five tiers at the bars of 1 2 5 10 20 per cent */
+        heat_model(&in, &o); memset(LL, 0, sizeof LL); memset(SS, 0, sizeof SS);
+        for (int i = 0; i < HEAT_N; i++) { int b = (int)HEAT_PCT[i] - 1; LL[b] = o.liq_long[i]; SS[b] = o.liq_short[i]; }
+        cog = o.cog_lin; cogn = o.cog_newton; snprintf(src, sizeof src, "simple"); ts_h = ts_oi;
+    }
+    double PL[HB], PS[HB], cl = 0, cs = 0;
+    for (int i = 0; i < HB; i++) {
+        cl += LL[i]; cs += SS[i];
+        double dl = depth_at(in.bid, i + 1), da = depth_at(in.ask, i + 1);
+        PL[i] = dl > 0 ? cl / dl : 0; PS[i] = da > 0 ? cs / da : 0;
+    }
+    int n = snprintf(body, cap, "{\"pair\":\"%s\",\"sym\":\"%s\",\"src\":\"%s\",\"age_s\":%lld,\"ladder_age_s\":%lld,\"book_age_s\":%lld,\"mark\":%.8g,\"price\":%.8g,\"oi_usd\":%.6g,"
+                     "\"bid_cov\":%.2f,\"ask_cov\":%.2f,\"cog\":%.4f,\"cogn\":%.4f,", pair, sym, src, now - ts_oi, now - ts_h, have_band ? now - ts_band : -1, mark, price > 0 ? price : mid, in.oi_usd, bcov, acov, cog, cogn);
+    const char *nm[4] = { "L", "S", "pl", "ps" }; const double *v[4] = { LL, SS, PL, PS };
     for (int k = 0; k < 4; k++) {
         n += snprintf(body + n, cap - (size_t)n, "\"%s\":[", nm[k]);
-        for (int i = 0; i < HEAT_N; i++) n += snprintf(body + n, cap - (size_t)n, "%s%.6g", i ? "," : "", v[k][i]);
+        for (int i = 0; i < HB; i++) n += snprintf(body + n, cap - (size_t)n, "%s%.6g", i ? "," : "", v[k][i]);
         n += snprintf(body + n, cap - (size_t)n, "]%s", k < 3 ? "," : "}");
     }
     *code = 200;
