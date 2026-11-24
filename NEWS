@@ -35,3 +35,7 @@ wincan 0.1.0 (2026-11-20)
   Volume candles no longer overlap (they do not in KuCoin): each keeps its own width, side by side, so fewer candles are on show when some are wide.
   The top centre shows the clock; with the mouse over the chart it shows the price under the mouse and the date and time of the candle under it (no vertical line).
   The keyboard: a window that believed it had the keyboard when it did not now notices at the next movement of the mouse and takes it again; a plain request for the foreground is tried before borrowing the input of another thread.
+  Within the range of the candles the pointer snaps to the middle of the nearest candle (standard and volume candles) and is held there until the user's real motion would have left the candle, then snaps to the next; the candle is brighter with a halo.
+  Vertical snap, the same way: at a candle the pointer is held on its open, high, low, close or an indicator line within a few pixels, until the real motion would have left those few pixels; the exact value is shown.
+  The top centre shows the date and time of the candle under the mouse while the mouse is over the candles, and the current date and time otherwise (one or the other, never both; the price under the mouse beside it while over the chart).
+  Hovering a heat strip bar shows it brighter on a haze, and at the top centre its side, its per cent from the present price (i to i+1) and the price range that is.

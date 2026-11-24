@@ -54,6 +54,8 @@ static struct {
     char   pair[24]; int tf;
     int    scale;                         /* percent: 100 = 200x200 */
     int    full, fw, fh, fscale;          /* full screen (f): on; the monitor's width and height; the magnification used there (percent, + and - change it there) */
+    int    vlock, warp_pending, wx, wy, lastcx, lastcy;   /* the vertical snap: locked onto a line; our own SetCursorPos waiting to echo, where to; where the pointer was left */
+    double vlock_val, vx, vy;                 /* the value of the line locked onto; the height the pointer would be at if it had not been held (the user's own movement, summed) */
     int    mx, my, m_in;                      /* the mouse's height in the window, and whether it is in it (a line follows it, with the price there) */
     RECT   rest;                          /* where the window was before full screen: f again, Esc, or anything that breaks out of it, puts it back there */
     char   pairs[MAX_PAIRS][24]; int npairs;
@@ -536,7 +538,7 @@ static COLORREF mixc(COLORREF base, COLORREF bg, double t)
     return RGB((int)(GetRValue(bg) + (GetRValue(base) - GetRValue(bg)) * t), (int)(GetGValue(bg) + (GetGValue(base) - GetGValue(bg)) * t), (int)(GetBValue(bg) + (GetBValue(base) - GetBValue(bg)) * t));
 }
 
-static void draw_heat(HDC dc, int W, int y0, int y1, double u, HFONT fs)
+static void draw_heat(HDC dc, int W, int y0, int y1, double u, HFONT fs, int hsel /* the bar under the mouse: side * 20 + i, or -1 */)
 {
     #define U(v) ((int)((v) * u + 0.5))
     double L[20], S[20], pl[20], ps[20], cog, cogn; int ok; DWORD when;
@@ -559,6 +561,10 @@ static void draw_heat(HDC dc, int W, int y0, int y1, double u, HFONT fs)
             if (stale) b *= 0.5;
             COLORREF col = mixc(side ? COL_DOWN : COL_UP, COL_BG, b);                 /* by side, as a trader reads it: longs (left) green, shorts (right) red (the author, 2026-11-20) */
             int xa = side ? x0 + U(2) + (int)(i * sw) : x0 - U(2) - (int)((i + 1) * sw), xb = xa + (int)(sw + 0.5) - 1; if (xb <= xa) xb = xa + 1;
+            if (side * 20 + i == hsel) {                                              /* the bar under the mouse: a haze over its whole column, and the bar brighter */
+                rect(dc, xa, y0 + 1, xb + 1, yb, mixc(col, COL_BG, 0.22));
+                col = mixc(RGB(255, 255, 255), col, 0.35);
+            }
             rect(dc, xa, yb - h, xb, yb, col);
         }
     }
@@ -587,12 +593,34 @@ static void draw_heat(HDC dc, int W, int y0, int y1, double u, HFONT fs)
     #undef U
 }
 
+/* where the candles were drawn last (paint fills it in): the mouse snaps to them */
+static int xl[MAX_BARS], cxs[MAX_BARS], bwid[MAX_BARS];       /* the left edge, the middle pixel and the width of each candle */
+static int lay_ok, lay_base, lay_n, lay_step, lay_top, lay_bot;
+#define NCAND 9                                                  /* what the pointer can lock onto at a candle: its open, high, low, close, and the lines of the indicators on show */
+static int cand_n[MAX_BARS], cand_y[MAX_BARS][NCAND];
+static double cand_v[MAX_BARS][NCAND];
+
+/* the candle the mouse is at: within the range of the candles it is the nearest one (inside a candle's width, or else the one whose edge is nearest); -1 when the mouse is
+ * not over the chart, or past the first and last candle, or something else (the editor, a drag) has the window */
+static int snap_sel(int mx, int my)
+{
+    if (!lay_ok || !A.m_in || A.dragging || A.editing || A.go_on || my < lay_top || my > lay_bot || lay_n <= lay_base) return -1;
+    int slack = lay_step / 2 + 1, bestd = 1 << 30, sel = -1;
+    if (mx < xl[lay_base] - slack || mx >= xl[lay_n - 1] + bwid[lay_n - 1] + slack) return -1;
+    for (int i = lay_base; i < lay_n; i++) {
+        int d = mx < xl[i] ? xl[i] - mx : mx >= xl[i] + bwid[i] ? mx - (xl[i] + bwid[i] - 1) : 0;
+        if (d < bestd) { bestd = d; sel = i; }
+    }
+    return sel;
+}
+
 /* local time of a Unix time, as a clock (secs: with seconds) or as the date and time of a candle (a day or a week candle: the date only; the year only in full screen, where there is room) */
-static void fmt_time(double t, int kind /* 0 clock, 1 candle */, char *out, size_t cap)
+static void fmt_time(double t, int kind /* 0 clock, 1 candle, 2 clock with the date */, char *out, size_t cap)
 {
     time_t tt = (time_t)t; struct tm lt;
     if (localtime_s(&lt, &tt) != 0) { out[0] = 0; return; }
     if (kind == 0) strftime(out, cap, "%H:%M:%S", &lt);
+    else if (kind == 2) strftime(out, cap, A.full ? "%Y-%m-%d %H:%M:%S" : "%m-%d %H:%M:%S", &lt);
     else if (A.tf >= 7) strftime(out, cap, A.full ? "%Y-%m-%d" : "%m-%d", &lt);
     else strftime(out, cap, A.full ? "%Y-%m-%d %H:%M" : "%m-%d %H:%M", &lt);
 }
@@ -620,9 +648,17 @@ static void paint(HDC dc, int W, int H)
     /* header */
     snprintf(buf, sizeof buf, "%s  %s", pair, TFS[tf]);
     text(dc, fb, COL_TXT, U(6), U(2), buf, 0);
-    if (n > 0) { fmt_price(price, buf, sizeof buf); text(dc, fp, COL_TXT, W - U(6), U(1), buf, 1); }
+    int hdr_l = U(6) + text_w(dc, fb, buf), hdr_r = W - U(6);                    /* where the header's own text ends at the left, and begins at the right */
+    if (n > 0) { fmt_price(price, buf, sizeof buf); text(dc, fp, COL_TXT, W - U(6), U(1), buf, 1); hdr_r = W - U(6) - text_w(dc, fp, buf); }
     int top = U(22), bot = H - U(40);
-    int centre_done = 0;                                              /* the top centre: the price under the mouse and the time of its candle, else the clock */
+    lay_ok = 0;
+    int hsel = -1;                                                  /* the heat bar under the mouse (side * 20 + i), when the mouse is in the strip */
+    if (A.m_in && !A.dragging && A.my >= H && A.my < Hf) {
+        double sw = (W / 2.0 - U(4)) / 20.0; int x0 = W / 2;
+        if (A.mx > x0 + U(2) - 1) { int i = (int)((A.mx - x0 - U(2)) / sw); if (i >= 0 && i < 20) hsel = 20 + i; }
+        else if (A.mx < x0 - U(2) + 1) { int i = (int)ceil((x0 - U(2) - A.mx) / sw) - 1; if (i < 0) i = 0; if (i < 20 && x0 - U(2) - A.mx < 20 * sw + 1) hsel = i; }
+    }
+    char hov_price[32] = "", hov_dt[40] = "";                          /* the top centre: with the mouse over the chart, the price under it and the date and time of its candle (set below), always with the clock */
     if (!have || n == 0) {
         text(dc, fn, failed ? COL_DOWN : COL_DIM, W / 2, H / 2 - U(8), failed ? "no connection to the server" : "loading...", 2);
     } else {
@@ -651,7 +687,6 @@ static void paint(HDC dc, int W, int H)
         int cw = W - U(8) - rpad;
         int step = dn > 0 ? cw / dn : 4; if (step < 2) step = 2;
         int bw = step - 1; if (bw % 2 == 0) bw--; if (bw < 1) bw = 1;       /* a body of an odd width has a middle pixel for the wick */
-        static int xl[MAX_BARS], cxs[MAX_BARS], bwid[MAX_BARS];
         if (A.ind[3]) {
             for (int pass = 0; pass < 2; pass++) {
                 double vm = 0; int vc = 0;
@@ -676,6 +711,8 @@ static void paint(HDC dc, int W, int H)
             int x0 = U(4) + (cw - step * dn);                    /* the newest bar at the right */
             for (int i = base; i < n; i++) { bwid[i] = bw; xl[i] = x0 + (i - base) * step; cxs[i] = xl[i] + bw / 2; }
         }
+        lay_ok = 1; lay_base = base; lay_n = n; lay_step = step; lay_top = top; lay_bot = bot;
+        int sel = snap_sel(A.mx, A.my);                          /* the candle at the mouse: drawn brighter, and its date and time shown at the top */
         double hi = h[base], lo = l[base];
         for (int i = base + 1; i < n; i++) { if (h[i] > hi) hi = h[i]; if (l[i] < lo) lo = l[i]; }
         if (A.ind[0]) for (int i = base; i < n; i++) if (okbb[i]) { if (bbu[i] > hi) hi = bbu[i]; if (bbl[i] < lo) lo = bbl[i]; }
@@ -688,6 +725,15 @@ static void paint(HDC dc, int W, int H)
         double pad = range * 0.04; hi += pad; lo -= pad; range = hi - lo;
         int ch = bot - top;
         #define Y(p) (top + (int)((hi - (p)) / range * ch + 0.5))
+        #define CAND(val) do { double cv_ = (val); int yy_ = Y(cv_); if (yy_ >= top && yy_ <= bot && k_ < NCAND) { cand_y[i][k_] = yy_; cand_v[i][k_] = cv_; k_++; } } while (0)
+        for (int i = base; i < n; i++) {
+            int k_ = 0;
+            CAND(o[i]); CAND(c[i]); CAND(h[i]); CAND(l[i]);
+            if (A.ind[0] && okbb[i]) { CAND(bbu[i]); CAND(bbl[i]); CAND(bbm[i]); }
+            if (A.ind[1] && ok9[i]) CAND(ma9[i]);
+            if (A.ind[2] && ok200[i]) CAND(ma200[i]);
+            cand_n[i] = k_;
+        }
         HRGN clip = CreateRectRgn(0, top, W, bot); SelectClipRgn(dc, clip);          /* the lines stay in the chart */
         #define LINE(arr, okarr, col, style) do { HPEN pn = CreatePen(style, 1, col); HGDIOBJ op = SelectObject(dc, pn); int started = 0; \
             for (int i = base; i < n; i++) { if (!okarr[i]) { started = 0; continue; } int px = cxs[i], py = Y(arr[i]); \
@@ -697,12 +743,23 @@ static void paint(HDC dc, int W, int H)
         if (A.ind[2]) LINE(ma200, ok200, COL_MA200, PS_SOLID);
         if (A.ind[1]) LINE(ma9, ok9, COL_MA9, PS_SOLID);
         SelectClipRgn(dc, NULL); DeleteObject(clip);
+        for (int pass = 0; pass < 2; pass++)                                           /* the candle under the mouse last, so that nothing is drawn over its halo */
         for (int i = base; i < n; i++) {
+            if ((i == sel) != (pass == 1)) continue;
             COLORREF col = c[i] >= o[i] ? COL_UP : COL_DOWN;                          /* every candle alike: the one forming is drawn as the others */
             int cx = cxs[i], x = xl[i], w = bwid[i];                                  /* the middle pixel of the body, for the wick */
-            rect(dc, cx, Y(h[i]), cx + 1, Y(l[i]) + 1, col);
             int yo = Y(o[i]), yc = Y(c[i]); if (yo > yc) { int tmp = yo; yo = yc; yc = tmp; }
-            rect(dc, x, yo, x + w, yc + 1 > yo + 1 ? yc + 1 : yo + 1, col);
+            int yb = yc + 1 > yo + 1 ? yc + 1 : yo + 1;
+            if (i == sel) {                                                              /* the candle under the mouse: a soft halo around it, and brighter */
+                COLORREF halo = mixc(col, COL_BG, 0.30), halo2 = mixc(col, COL_BG, 0.14);
+                int g1 = U(1) > 1 ? U(1) : 1;
+                rect(dc, x - 2 * g1, yo - 2 * g1, x + w + 2 * g1, yb + 2 * g1, halo2);
+                rect(dc, x - g1, yo - g1, x + w + g1, yb + g1, halo);
+                rect(dc, cx - g1, Y(h[i]) - g1, cx + 1 + g1, Y(l[i]) + 1 + g1, halo);
+                col = mixc(RGB(255, 255, 255), col, 0.38);
+            }
+            rect(dc, cx, Y(h[i]), cx + 1, Y(l[i]) + 1, col);
+            rect(dc, x, yo, x + w, yb, col);
         }
         if (pos.entry > 0 && pos.size != 0) {
             int y = Y(pos.entry);
@@ -726,23 +783,39 @@ static void paint(HDC dc, int W, int H)
         double mx = c[n - 1]; int ypl = Y(mx);
         { HPEN pen = CreatePen(PS_SOLID, 1, c[n - 1] >= o[n - 1] ? COL_UP : COL_DOWN); HGDIOBJ old = SelectObject(dc, pen); MoveToEx(dc, U(4), ypl, NULL); LineTo(dc, W - U(4), ypl); SelectObject(dc, old); DeleteObject(pen); }
         if (A.m_in && !A.dragging && !A.editing && !A.go_on && A.my >= top && A.my <= bot) {          /* a line follows the mouse up and down, and the price under it is shown at the top, in the middle */
-            double pm = hi - (A.my - top) * range / ch;
+            double pm = A.vlock && sel >= 0 ? A.vlock_val : hi - (A.my - top) * range / ch;      /* locked onto a line: its exact value */
             HPEN pen = CreatePen(PS_DASH, 1, RGB(190, 198, 210)); HGDIOBJ old = SelectObject(dc, pen);
             SetBkMode(dc, TRANSPARENT); MoveToEx(dc, 0, A.my, NULL); LineTo(dc, W, A.my); SelectObject(dc, old); DeleteObject(pen);
-            char pb[32], tb[40] = ""; fmt_price(pm, pb, sizeof pb);
-            { int gap2 = step - bw;                                                   /* the candle under the mouse (no vertical line: only its date and time are shown) */
-              for (int i = base; i < n; i++) if (A.mx >= xl[i] - (gap2 + 1) / 2 && A.mx < xl[i] + bwid[i] + gap2 / 2) { fmt_time(t[i], 1, tb, sizeof tb); break; } }
-            int wp = text_w(dc, fp, pb), wt = tb[0] ? text_w(dc, fn, tb) : 0, sp = tb[0] ? U(8) : 0, x = W / 2 - (wp + sp + wt) / 2;
-            text(dc, fp, COL_TXT, x, U(1), pb, 0);
-            if (tb[0]) text(dc, fn, RGB(170, 180, 192), x + wp + sp, U(4), tb, 0);
-            centre_done = 1;
+            fmt_price(pm, hov_price, sizeof hov_price);
+            if (sel >= 0) fmt_time(t[sel], 1, hov_dt, sizeof hov_dt);                 /* the candle snapped to (no vertical line: only its date and time are shown) */
         }
         if (failed) text(dc, fs, COL_DOWN, U(5), top - U(1), "no connection: showing the last data", 0);          /* the chart stays, as it was */
         else if (age > 20000) { snprintf(buf, sizeof buf, "%d s old", (int)(age / 1000)); text(dc, fs, COL_ENTRY, U(5), top - U(1), buf, 0); }
         else if (!complete) text(dc, fs, COL_DIM, U(5), top - U(1), "history loading", 0);
     }
 
-    if (!centre_done && !A.go_on) { char cb[24]; fmt_time((double)time(NULL), 0, cb, sizeof cb); text(dc, fn, COL_DIM, W / 2, U(4), cb, 2); }      /* the clock */
+    if (!A.go_on && hsel >= 0 && price > 0) {                    /* over a heat bar: its distance from the present price in per cent, and its price range (bar i is i to i+1 per cent from the price) */
+        int sd = hsel / 20, bi = hsel % 20; double sg = sd ? 1.0 : -1.0; const char *ss = sd ? "+" : "-";
+        char pa[24], pb[24], ht[96], p0[8];
+        fmt_price(price * (1 + sg * bi / 100.0), pa, sizeof pa); fmt_price(price * (1 + sg * (bi + 1) / 100.0), pb, sizeof pb);
+        if (bi == 0) snprintf(p0, sizeof p0, "0"); else snprintf(p0, sizeof p0, "%s%d", ss, bi);
+        snprintf(ht, sizeof ht, "%s  %s to %s%d%%   %s - %s", sd ? "S" : "L", p0, ss, bi + 1, pa, pb);
+        if (text_w(dc, fn, ht) > hdr_r - hdr_l - 2 * U(4)) {      /* too wide: the middle of the bar only */
+            fmt_price(price * (1 + sg * (bi + 0.5) / 100.0), pa, sizeof pa); snprintf(ht, sizeof ht, "%s  %s%.1f%%  %s", sd ? "S" : "L", ss, bi + 0.5, pa);
+        }
+        text(dc, fn, sd ? RGB(240, 130, 130) : RGB(120, 220, 150), W / 2, U(4), ht, 2);
+    } else if (!A.go_on) {                                       /* the top centre: [the price under the mouse, with the mouse over the chart] and the date and time: of the candle the mouse is at, else the current one (never both) */
+        char cb[40]; int gp = U(10), wp = hov_price[0] ? text_w(dc, fp, hov_price) : 0;
+        int avail = hdr_r - hdr_l - 2 * U(4), wc, total; const char *slot; COLORREF scol;
+        if (hov_dt[0]) { slot = hov_dt; scol = RGB(190, 198, 210); }
+        else { fmt_time((double)time(NULL), 2, cb, sizeof cb); slot = cb; scol = COL_DIM; }       /* the current date and time, with the date if there is room */
+        wc = text_w(dc, fn, slot); total = wc + (wp ? wp + gp : 0);
+        if (slot == cb && total > avail) { fmt_time((double)time(NULL), 0, cb, sizeof cb); wc = text_w(dc, fn, cb); total = wc + (wp ? wp + gp : 0); }       /* too tight: the time only */
+        int x = W / 2 - total / 2;
+        if (x < hdr_l + U(4)) x = hdr_l + U(4);
+        if (wp) { text(dc, fp, COL_TXT, x, U(1), hov_price, 0); x += wp + gp; }
+        text(dc, fn, scol, x, U(4), slot, 0);
+    }
 
     /* the footer: profit and loss */
     int fy = H - U(38);
@@ -830,7 +903,7 @@ static void paint(HDC dc, int W, int H)
         rect(dc, W / 3, H - U(17), cx - U(8), H - U(2), COL_BG);
         text(dc, fs, IND_COL[A.hover], cx - U(10), H - U(16), lab, 1);
     }
-    draw_heat(dc, W, H, Hf, u, fs);
+    draw_heat(dc, W, H, Hf, u, fs, hsel);
     DeleteObject(fb); DeleteObject(fn); DeleteObject(fs); DeleteObject(fp); DeleteObject(fx); DeleteObject(fx);
     #undef U
     #undef Y
@@ -1101,6 +1174,38 @@ static int test_snap(const char *file)
     return bad;
 }
 
+/*
+ * The pointer over the chart.  Within the range of the candles it is held at the middle of the nearest candle, and vertically on the open, high, low and close of that
+ * candle and on the lines of the indicators there (within a few pixels: 4 at 100%).  The user's own movement is summed (the change from where we left the pointer at each
+ * step) to find where the pointer would be if it were not held; it is let go, to the next candle's middle or the next line or to where it then is, when that has taken it out
+ * of the candle (or out of the few pixels of the line).  So entering a candle snaps the pointer to its middle and it stays there until the real motion would have left it.
+ * Our own SetCursorPos comes back as a mouse movement that is not the user's: it is told by its place.
+ */
+static void pointer_move(HWND h, int mx, int my)
+{
+    if (A.warp_pending) {
+        A.warp_pending = 0;
+        if (abs(mx - A.wx) <= 1 && abs(my - A.wy) <= 1) { A.lastcx = A.wx; A.lastcy = A.wy; return; }
+    }
+    if (A.m_in && mx == A.mx && my == A.my) return;
+    double vx = A.m_in ? A.vx + (mx - A.lastcx) : mx, vy = A.m_in ? A.vy + (my - A.lastcy) : my;      /* where it would be, not held */
+    int vxi = (int)floor(vx + 0.5), vyi = (int)floor(vy + 0.5);
+    A.mx = mx; A.my = my; A.m_in = 1;
+    int sc = snap_sel(vxi, vyi), tx = vxi, ty = vyi, lock = 0; double lv = 0;
+    if (sc >= 0) {
+        tx = cxs[sc];
+        int tol = (int)(4 * ui_u() + 0.5), best = tol + 1;
+        for (int k = 0; k < cand_n[sc]; k++) { int d = abs(vyi - cand_y[sc][k]); if (d < best) { best = d; ty = cand_y[sc][k]; lv = cand_v[sc][k]; lock = 1; } }
+    }
+    A.vlock = lock; A.vlock_val = lv; A.vx = vx; A.vy = vy;
+    if (tx != mx || ty != my) {
+        POINT pt = { tx, ty }; ClientToScreen(h, &pt); SetCursorPos(pt.x, pt.y);
+        A.warp_pending = 1; A.wx = tx; A.wy = ty; A.mx = tx; A.my = ty;
+    }
+    A.lastcx = tx; A.lastcy = ty;
+    InvalidateRect(h, NULL, FALSE);
+}
+
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     switch (m) {
@@ -1170,7 +1275,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = cli_w(), H = core_h(), hv = -1; double u = ui_u();
         for (int k = 0; k < 4; k++) { int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r); if (abs(mx - cx) <= r + 3 && abs(my - cy) <= r + 3) hv = k; }
         if (hv != A.hover) { A.hover = hv; InvalidateRect(h, NULL, FALSE); }
-        if (!A.m_in || my != A.my || mx != A.mx) { A.mx = mx; A.my = my; A.m_in = 1; InvalidateRect(h, NULL, FALSE); }      /* the line follows the mouse */
+        pointer_move(h, mx, my);                                                    /* the line follows the mouse, and the pointer snaps */
         }
         if (!A.tracking) { TRACKMOUSEEVENT te = { sizeof te, TME_LEAVE, h, 0 }; TrackMouseEvent(&te); A.tracking = 1; }
         if (A.active && !A.dragging && !A.shot && GetForegroundWindow() != h) lose_keyboard(0);        /* it thought it had the keyboard and has not: no more a window that ignores the keys */
@@ -1178,7 +1283,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         return 0;
     case WM_MOUSELEAVE:
         A.tracking = 0; A.declined = 0;
-        if (A.m_in) { A.m_in = 0; InvalidateRect(h, NULL, FALSE); }
+        if (A.m_in) { A.m_in = 0; A.vlock = 0; A.warp_pending = 0; InvalidateRect(h, NULL, FALSE); }
         if (A.hover != -1) { A.hover = -1; InvalidateRect(h, NULL, FALSE); }
         if (A.active && !A.dragging) {                                              /* the mouse out of the window: it gives the keyboard back at once, */
             if (A.editing) commit_edit();                                           /* and that, like Enter, means the position has been entered */
