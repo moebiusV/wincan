@@ -33,3 +33,5 @@ wincan 0.1.0 (2026-11-20)
   A dashed line follows the mouse up and down the chart (small window and full screen) and the price under it is shown at the top centre.
   The window takes the keyboard when the mouse is over it (no click needed), and no longer draws a blue border while it has it.
   Volume candles no longer overlap (they do not in KuCoin): each keeps its own width, side by side, so fewer candles are on show when some are wide.
+  The top centre shows the clock; with the mouse over the chart it shows the price under the mouse and the date and time of the candle under it (no vertical line).
+  The keyboard: a window that believed it had the keyboard when it did not now notices at the next movement of the mouse and takes it again; a plain request for the foreground is tried before borrowing the input of another thread.

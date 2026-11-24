@@ -54,7 +54,7 @@ static struct {
     char   pair[24]; int tf;
     int    scale;                         /* percent: 100 = 200x200 */
     int    full, fw, fh, fscale;          /* full screen (f): on; the monitor's width and height; the magnification used there (percent, + and - change it there) */
-    int    my, m_in;                      /* the mouse's height in the window, and whether it is in it (a line follows it, with the price there) */
+    int    mx, my, m_in;                      /* the mouse's height in the window, and whether it is in it (a line follows it, with the price there) */
     RECT   rest;                          /* where the window was before full screen: f again, Esc, or anything that breaks out of it, puts it back there */
     char   pairs[MAX_PAIRS][24]; int npairs;
     Position pos[MAX_PAIRS];              /* by index in pairs[] */
@@ -488,6 +488,8 @@ static void fmt_money(double v, char *out, size_t cap)
 
 static HFONT font(int px, int bold) { return CreateFontA(-px, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, "Segoe UI"); }
 
+static int text_w(HDC dc, HFONT f, const char *s) { HGDIOBJ old = SelectObject(dc, f); SIZE sz; GetTextExtentPoint32A(dc, s, (int)strlen(s), &sz); SelectObject(dc, old); return sz.cx; }
+
 static void text(HDC dc, HFONT f, COLORREF col, int x, int y, const char *s, int align /* 0 left, 1 right, 2 center */)
 {
     HGDIOBJ old = SelectObject(dc, f);
@@ -585,6 +587,16 @@ static void draw_heat(HDC dc, int W, int y0, int y1, double u, HFONT fs)
     #undef U
 }
 
+/* local time of a Unix time, as a clock (secs: with seconds) or as the date and time of a candle (a day or a week candle: the date only; the year only in full screen, where there is room) */
+static void fmt_time(double t, int kind /* 0 clock, 1 candle */, char *out, size_t cap)
+{
+    time_t tt = (time_t)t; struct tm lt;
+    if (localtime_s(&lt, &tt) != 0) { out[0] = 0; return; }
+    if (kind == 0) strftime(out, cap, "%H:%M:%S", &lt);
+    else if (A.tf >= 7) strftime(out, cap, A.full ? "%Y-%m-%d" : "%m-%d", &lt);
+    else strftime(out, cap, A.full ? "%Y-%m-%d %H:%M" : "%m-%d %H:%M", &lt);
+}
+
 static void paint(HDC dc, int W, int H)
 {
     double u = ui_u();                                     /* scale factor */
@@ -600,7 +612,7 @@ static void paint(HDC dc, int W, int H)
     double price = A.price, age = A.age_ms;
     double pnl_price = A.mark > 0 ? A.mark : A.price;                   /* the P&L is at the mark price, which moves every second, like KuCoin's; the header shows the last trade */
     static double t[MAX_BARS], o[MAX_BARS], h[MAX_BARS], l[MAX_BARS], c[MAX_BARS], v[MAX_BARS];
-    memcpy(o, A.o, sizeof o); memcpy(h, A.h, sizeof h); memcpy(l, A.l, sizeof l); memcpy(c, A.c, sizeof c); memcpy(v, A.v, sizeof v); (void)t;
+    memcpy(t, A.t, sizeof t); memcpy(o, A.o, sizeof o); memcpy(h, A.h, sizeof h); memcpy(l, A.l, sizeof l); memcpy(c, A.c, sizeof c); memcpy(v, A.v, sizeof v);
     LeaveCriticalSection(&A.cs);
     Position pos = *cur_pos();
     char buf[96], buf2[160];
@@ -610,6 +622,7 @@ static void paint(HDC dc, int W, int H)
     text(dc, fb, COL_TXT, U(6), U(2), buf, 0);
     if (n > 0) { fmt_price(price, buf, sizeof buf); text(dc, fp, COL_TXT, W - U(6), U(1), buf, 1); }
     int top = U(22), bot = H - U(40);
+    int centre_done = 0;                                              /* the top centre: the price under the mouse and the time of its candle, else the clock */
     if (!have || n == 0) {
         text(dc, fn, failed ? COL_DOWN : COL_DIM, W / 2, H / 2 - U(8), failed ? "no connection to the server" : "loading...", 2);
     } else {
@@ -716,12 +729,20 @@ static void paint(HDC dc, int W, int H)
             double pm = hi - (A.my - top) * range / ch;
             HPEN pen = CreatePen(PS_DASH, 1, RGB(190, 198, 210)); HGDIOBJ old = SelectObject(dc, pen);
             SetBkMode(dc, TRANSPARENT); MoveToEx(dc, 0, A.my, NULL); LineTo(dc, W, A.my); SelectObject(dc, old); DeleteObject(pen);
-            fmt_price(pm, buf, sizeof buf); text(dc, fp, COL_TXT, W / 2, U(1), buf, 2);
+            char pb[32], tb[40] = ""; fmt_price(pm, pb, sizeof pb);
+            { int gap2 = step - bw;                                                   /* the candle under the mouse (no vertical line: only its date and time are shown) */
+              for (int i = base; i < n; i++) if (A.mx >= xl[i] - (gap2 + 1) / 2 && A.mx < xl[i] + bwid[i] + gap2 / 2) { fmt_time(t[i], 1, tb, sizeof tb); break; } }
+            int wp = text_w(dc, fp, pb), wt = tb[0] ? text_w(dc, fn, tb) : 0, sp = tb[0] ? U(8) : 0, x = W / 2 - (wp + sp + wt) / 2;
+            text(dc, fp, COL_TXT, x, U(1), pb, 0);
+            if (tb[0]) text(dc, fn, RGB(170, 180, 192), x + wp + sp, U(4), tb, 0);
+            centre_done = 1;
         }
         if (failed) text(dc, fs, COL_DOWN, U(5), top - U(1), "no connection: showing the last data", 0);          /* the chart stays, as it was */
         else if (age > 20000) { snprintf(buf, sizeof buf, "%d s old", (int)(age / 1000)); text(dc, fs, COL_ENTRY, U(5), top - U(1), buf, 0); }
         else if (!complete) text(dc, fs, COL_DIM, U(5), top - U(1), "history loading", 0);
     }
+
+    if (!centre_done && !A.go_on) { char cb[24]; fmt_time((double)time(NULL), 0, cb, sizeof cb); text(dc, fn, COL_DIM, W / 2, U(4), cb, 2); }      /* the clock */
 
     /* the footer: profit and loss */
     int fy = H - U(38);
@@ -878,15 +899,26 @@ static void take_keyboard(void)
     HWND fg = GetForegroundWindow();
     A.prev = (fg && fg != A.hwnd) ? fg : NULL;
     set_passive(0);
-    /* Windows lets a program take the foreground only after input it received; a mouse that merely moved over the window is not that, so borrow the input of the thread that has it */
-    DWORD me = GetCurrentThreadId(), they = fg ? GetWindowThreadProcessId(fg, NULL) : 0;
-    int att = they && they != me && AttachThreadInput(me, they, TRUE);
+    /* Windows lets a program take the foreground only after input it received, and a mouse that merely moved over the window is not always that.  Ask plainly first; only if
+     * that is refused borrow the input of the thread that has the foreground (attached for as short a time as possible: the two threads wait on each other while joined) */
     SetForegroundWindow(A.hwnd);
+    if (GetForegroundWindow() != A.hwnd) {
+        DWORD me = GetCurrentThreadId(), they = fg ? GetWindowThreadProcessId(fg, NULL) : 0;
+        int att = they && they != me && AttachThreadInput(me, they, TRUE);
+        SetForegroundWindow(A.hwnd);
+        if (att) AttachThreadInput(me, they, FALSE);
+    }
     SetFocus(A.hwnd);
-    if (att) AttachThreadInput(me, they, FALSE);
     if (GetForegroundWindow() != A.hwnd) { set_passive(1); A.prev = NULL; return; }       /* refused: try again at the next movement of the mouse */
     A.declined = 0;
     A.active = 1;
+    InvalidateRect(A.hwnd, NULL, FALSE);
+}
+
+static void lose_keyboard(int decline)                  /* the keyboard has gone to another window: nothing here may go on believing it has it */
+{
+    A.active = 0; A.editing = 0; A.go_on = 0; A.declined = decline;          /* decline: do not take it back until the mouse has left (it was taken away) */
+    set_passive(1); set_full(0);
     InvalidateRect(A.hwnd, NULL, FALSE);
 }
 
@@ -942,7 +974,7 @@ static void show_cached(void)
 {
     A.have = 0; A.n = 0;
     for (int i = 0; i < A.ncache; i++) if (A.cache[i].tf == A.tf && !strcmp(A.cache[i].pair, A.pair)) {
-        memcpy(A.o, A.cache[i].o, sizeof A.o); memcpy(A.h, A.cache[i].h, sizeof A.h); memcpy(A.l, A.cache[i].l, sizeof A.l); memcpy(A.c, A.cache[i].c, sizeof A.c); memcpy(A.v, A.cache[i].v, sizeof A.v);
+        memcpy(A.t, A.cache[i].t, sizeof A.t); memcpy(A.o, A.cache[i].o, sizeof A.o); memcpy(A.h, A.cache[i].h, sizeof A.h); memcpy(A.l, A.cache[i].l, sizeof A.l); memcpy(A.c, A.cache[i].c, sizeof A.c); memcpy(A.v, A.cache[i].v, sizeof A.v);
         A.n = A.cache[i].n; A.price = A.cache[i].price; A.mark = A.cache[i].mark; A.age_ms = A.cache[i].age_ms; A.complete = A.cache[i].complete; A.have = 1;
         snprintf(A.data_pair, sizeof A.data_pair, "%s", A.pair); A.data_tf = A.tf;
         break;
@@ -1138,9 +1170,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = cli_w(), H = core_h(), hv = -1; double u = ui_u();
         for (int k = 0; k < 4; k++) { int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r); if (abs(mx - cx) <= r + 3 && abs(my - cy) <= r + 3) hv = k; }
         if (hv != A.hover) { A.hover = hv; InvalidateRect(h, NULL, FALSE); }
-        if (!A.m_in || my != A.my) { A.my = my; A.m_in = 1; InvalidateRect(h, NULL, FALSE); }      /* the line follows the mouse */
+        if (!A.m_in || my != A.my || mx != A.mx) { A.mx = mx; A.my = my; A.m_in = 1; InvalidateRect(h, NULL, FALSE); }      /* the line follows the mouse */
         }
         if (!A.tracking) { TRACKMOUSEEVENT te = { sizeof te, TME_LEAVE, h, 0 }; TrackMouseEvent(&te); A.tracking = 1; }
+        if (A.active && !A.dragging && !A.shot && GetForegroundWindow() != h) lose_keyboard(0);        /* it thought it had the keyboard and has not: no more a window that ignores the keys */
         if (!A.active && !A.declined && !A.shot && !A.hidden) take_keyboard();            /* the mouse over the window gives it the keyboard, no click needed */
         return 0;
     case WM_MOUSELEAVE:
@@ -1153,7 +1186,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             give_up_keyboard();
         }
         return 0;
-    case WM_KILLFOCUS: if (A.active && !A.dragging) { A.active = 0; A.editing = 0; A.go_on = 0; set_passive(1); A.declined = 1; set_full(0); InvalidateRect(h, NULL, FALSE); } return 0;      /* another window took the keyboard: out of full screen */
+    case WM_KILLFOCUS: if (A.active && !A.dragging) lose_keyboard(1); return 0;      /* another window took the keyboard: out of full screen */
     case WM_KEYDOWN:
         if (A.go_on) {                                                              /* the 'g' box */
             int m[5], nm = go_matches(m), len = (int)strlen(A.go_buf);
@@ -1281,6 +1314,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
         else if (!strcmp(a, "--scale") && i + 1 < argc) { A.scale = atoi(nx); i++; }
         else if (!strcmp(a, "--shot-full") && i + 1 < argc) { int fw = 0, fh = 0; if (sscanf(nx, "%dx%d", &fw, &fh) == 2 && fw > 0 && fh > 0) { A.full = 1; A.fw = fw; A.fh = fh; } i++; }
         else if (!strcmp(a, "--shot-mouse") && i + 1 < argc) { A.my = atoi(nx); A.m_in = 1; i++; }
+        else if (!strcmp(a, "--shot-mousex") && i + 1 < argc) { A.mx = atoi(nx); i++; }
         else if (!strcmp(a, "--test-close")) A.test_close = 1;
         else if (!strcmp(a, "--test-snap") && i + 1 < argc) { exit(test_snap(nx) ? 1 : 0); }
         else if (!strcmp(a, "--shot-editor")) A.shot_editor = 1;

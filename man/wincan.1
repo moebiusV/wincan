@@ -48,7 +48,7 @@ close the trade of the coin on show at the current price (the mark) and log it, 
 .B Esc
 leave full screen; otherwise (and first, to close the editor or the go\-to box if one is open) give the keyboard back.
 The line across the window at the latest price is green when the candle forming is up and red when it is down.  The highest high and the lowest low of the bars on show are each marked by a dotted line across the window with its value at the left.
-A dashed horizontal line follows the mouse up and down the chart, in the small window and in full screen, and the price under it is shown at the top, in the middle.
+A dashed horizontal line follows the mouse up and down the chart, in the small window and in full screen, and the price under it is shown at the top, in the middle; with the mouse over a candle, that candle's date and time (local time; the date only for day and week candles; the year too in full screen) are shown beside the price, with no vertical line.  When the mouse is not over the chart, the clock (local time, hours minutes seconds) is shown there.
 .SS Indicators
 Small dots at the bottom right switch the Bollinger bands (20 periods, 2 standard deviations; violet), the 9\-period moving average (orange) and the 200\-period moving average (blue).  A filled dot is on, a ring is off; hover over a dot for its name, click it to switch it.  They are kept in the settings.  A fourth, white dot switches the volume candles, drawn as KuCoin's chart draws them (the rule was measured from two of its screenshots against the real volumes, see volume-candles.txt in the sources): no candle is thinner than a standard one; the width starts to grow at the mean volume on show and grows with the logarithm of the volume, as max(1, 1.10 + 1.57 ln(volume/mean)) times the standard width, in an odd number of pixels; the candles do not overlap: each keeps its own width, side by side, so the wide ones take room and fewer candles are on show.  The standard candles are all as wide as each other.
 .SS Moving
@@ -82,7 +82,7 @@ draw once and write the picture to a file, then exit (for testing; with \fB\-\-s
 with \fB\-\-shot\fR, draw the full screen layout for a monitor of that size.
 .TP
 .BI \-\-shot\-mouse " Y"
-draw the line that follows the mouse as if the mouse were at that height.
+draw the line that follows the mouse as if the mouse were at that height, and with \fB\-\-shot\-mousex\fR \fIX\fR at that distance from the left.
 .SH FILES
 .TP
 .B %APPDATA%\\wincan\\wincan.ini

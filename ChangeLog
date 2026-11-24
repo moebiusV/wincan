@@ -40,3 +40,4 @@
 2026-11-24  wincan.c: in full screen a dashed line follows the mouse and the price under it is shown top centre; --shot-mouse.
 2026-11-24  wincan.c: volume candles do not overlap: laid out from the newest to the left at their own widths with the standard gap; the mean volume is taken over the candles on show.
 2026-11-24  wincan.c: the line that follows the mouse, and its price, in the small window too.
+2026-11-24  wincan.c: the clock at the top centre, and the date and time of the candle under the mouse beside the price (candle times now reach paint: A.t was never filled); --shot-mousex; lose_keyboard(): one place for the keyboard having gone elsewhere, and a window that thinks it has the keyboard but has not corrects itself at the next mouse movement; take_keyboard asks plainly for the foreground before attaching to another thread's input.
