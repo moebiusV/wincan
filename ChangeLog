@@ -35,3 +35,8 @@
 2026-11-20  heat strip: colours by side (longs, left, green; shorts, right, red) and the labels L and S at the ends.
 
 2026-11-20  wincan.c: a caret in the position boxes (Left, Right, Home, End, Delete; a key goes in at the caret, so a minus can be put in front of a number); the g key opens a go-to box with auto-complete (src/gomatch.h, tests/test_go.c): Tab completes, Up and Down choose, Enter goes to the pair.
+2026-11-24  wincan.c: f toggles full screen (set_full; the rectangle before is kept and restored on f, Esc, another window taking the keyboard, hiding, a display change, quitting; fullscale; the candles widen on a wide screen); --shot-full; the mouse over the window takes the keyboard (with AttachThreadInput past the foreground lock; not again after Esc or Alt+Tab until the mouse has left and come back).
+2026-11-24  wincan.c: no blue border while the window has the keyboard.
+2026-11-24  wincan.c: in full screen a dashed line follows the mouse and the price under it is shown top centre; --shot-mouse.
+2026-11-24  wincan.c: volume candles do not overlap: laid out from the newest to the left at their own widths with the standard gap; the mean volume is taken over the candles on show.
+2026-11-24  wincan.c: the line that follows the mouse, and its price, in the small window too.

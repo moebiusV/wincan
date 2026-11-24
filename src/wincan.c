@@ -53,6 +53,9 @@ static struct {
     char   host[128]; int port;
     char   pair[24]; int tf;
     int    scale;                         /* percent: 100 = 200x200 */
+    int    full, fw, fh, fscale;          /* full screen (f): on; the monitor's width and height; the magnification used there (percent, + and - change it there) */
+    int    my, m_in;                      /* the mouse's height in the window, and whether it is in it (a line follows it, with the price there) */
+    RECT   rest;                          /* where the window was before full screen: f again, Esc, or anything that breaks out of it, puts it back there */
     char   pairs[MAX_PAIRS][24]; int npairs;
     Position pos[MAX_PAIRS];              /* by index in pairs[] */
     /* data (under cs) */
@@ -65,6 +68,7 @@ static struct {
     HANDLE wake; volatile int quit;
     /* ui */
     int    ind[4], hover;                 /* the toggles on/off: Bollinger bands, 9 MA, 200 MA, volume candles; the dot the mouse is over (-1: none) */
+    int    declined;                      /* the keyboard was given up (Esc, another window) with the mouse still over the window: no taking it back until the mouse has left and come again, or a click */
     int    active, dragging, editing, tracking, hidden;   /* editing: the position editor is open */
     POINT  drag_c0; RECT drag_r0;          /* a drag: where the cursor and the window were when the button went down */
     int    field_last;                    /* the box last edited: e resumes there (kept in the settings) */
@@ -73,7 +77,7 @@ static struct {
     int    cur[4];                         /* the caret of each box: left and right move it, a key goes in at it (a minus in front of a number, say) */
     int    go_on, go_cur, go_sel; char go_buf[24];     /* the 'g' box: a ticker typed with auto-complete; the caret in it; the suggestion chosen */
     int    shot_go;
-    HWND   prev;                         /* the window that had the keyboard before a click */
+    HWND   prev;                         /* the window that had the keyboard before the mouse came */
     char   ini[MAX_PATH], logpath[MAX_PATH];
     volatile int close_req;              /* x was pressed: the worker closes the trade at the mark */
     struct { int valid; DWORD when; double pct, usd, mfe, mae; char pair[24]; } last;     /* the trade closed last, shown for a while */
@@ -82,6 +86,14 @@ static struct {
     UINT   taskbar_created;
     HICON  icon;
 } A;
+
+/* the size of the window as drawn: the small window at its scale, or the whole monitor in full screen (where the text has a magnification of its own) */
+static int    win_w(void) { return BASE_W * A.scale / 100; }
+static int    win_h(void) { return (BASE_H + HEAT_H) * A.scale / 100; }
+static double ui_u(void)  { return (A.full ? A.fscale : A.scale) / 100.0; }
+static int    cli_w(void) { return A.full ? A.fw : win_w(); }
+static int    cli_h(void) { return A.full ? A.fh : win_h(); }
+static int    core_h(void) { return A.full ? A.fh - (int)(HEAT_H * ui_u() + 0.5) : BASE_H * A.scale / 100; }          /* the window without the heat strip */
 
 /* ---------------------------------------------------------------- settings */
 
@@ -140,8 +152,10 @@ static void save_all(void)
     WritePrivateProfileStringA("wincan", "ma200", A.ind[2] ? "1" : "0", A.ini);
     WritePrivateProfileStringA("wincan", "volcandles", A.ind[3] ? "1" : "0", A.ini);
     snprintf(b, sizeof b, "%s:%d", A.host, A.port); WritePrivateProfileStringA("wincan", "server", b, A.ini);
-    RECT r;
-    if (A.hwnd && !A.shot && GetWindowRect(A.hwnd, &r)) {
+    snprintf(b, sizeof b, "%d", A.fscale); WritePrivateProfileStringA("wincan", "fullscale", b, A.ini);
+    RECT r; int have_r = 0;
+    if (A.hwnd && !A.shot) { if (A.full) { r = A.rest; have_r = 1; } else have_r = GetWindowRect(A.hwnd, &r) != 0; }      /* in full screen the place kept is the small window's */
+    if (have_r) {
         snprintf(b, sizeof b, "%ld", r.left); WritePrivateProfileStringA("wincan", "x", b, A.ini);
         snprintf(b, sizeof b, "%ld", r.top);  WritePrivateProfileStringA("wincan", "y", b, A.ini);
     }
@@ -361,7 +375,8 @@ static DWORD WINAPI worker(LPVOID arg)
         char pair[24], sig[24] = ""; int tf, bars, incremental = 0;
         EnterCriticalSection(&A.cs);
         snprintf(pair, sizeof pair, "%s", A.pair); tf = A.tf;
-        bars = (BASE_W * A.scale / 100 - 8) / 4 + 205; if (bars > MAX_BARS) bars = MAX_BARS; if (bars < 10) bars = 10;      /* what is shown, and 200 more for the longest average */
+        int vis0 = (cli_w() - 8) / 4; if (vis0 > MAX_BARS - 205) vis0 = MAX_BARS - 205;
+        bars = vis0 + 205; if (bars > MAX_BARS) bars = MAX_BARS; if (bars < 10) bars = 10;      /* what is shown, and 200 more for the longest average */
         int sl = find_slot(pair, tf);
         /* once the history is whole, a second's poll asks only for the last two bars and sends the signature it has: "unchanged" costs a few bytes */
         if (sl >= 0 && A.cache[sl].n >= 2 && A.cache[sl].complete && !A.cache[sl].need_full && A.cache[sl].sig[0]
@@ -572,7 +587,7 @@ static void draw_heat(HDC dc, int W, int y0, int y1, double u, HFONT fs)
 
 static void paint(HDC dc, int W, int H)
 {
-    double u = W / (double)BASE_W;                         /* scale factor */
+    double u = ui_u();                                     /* scale factor */
     #define U(v) ((int)((v) * u + 0.5))
     rect(dc, 0, 0, W, H, COL_BG);
     const int Hf = H; H -= U(HEAT_H);                      /* everything above lays out in the core window; the strip is the last HEAT_H pixels */
@@ -600,7 +615,9 @@ static void paint(HDC dc, int W, int H)
     } else {
         /* the chart */
         int rpad = U(12);                                          /* black space at the right, to see the newest candle move */
-        int vis = (W - U(8) - rpad) / 4; if (vis < 10) vis = 10;
+        int vis = (W - U(8) - rpad) / 4;
+        if (vis > MAX_BARS - 205) { int span = W - U(8) - rpad, st; vis = MAX_BARS - 205; st = (span + vis - 1) / vis; vis = span / st; }      /* a wide screen: no more bars than the server sends less the 200 the long average needs, so each is wider (and fewer, to fill the width in whole pixels) */
+        if (vis < 10) vis = 10;
         int dn = n < vis ? n : vis, base = n - dn;                      /* the bars shown are base .. n-1 */
         static double ma9[MAX_BARS], ma200[MAX_BARS], bbm[MAX_BARS], bbu[MAX_BARS], bbl[MAX_BARS];
         static unsigned char ok9[MAX_BARS], ok200[MAX_BARS], okbb[MAX_BARS];
@@ -612,6 +629,40 @@ static void paint(HDC dc, int W, int H)
                             double m = sum / 20; for (int k = i - 19; k <= i; k++) sq += (c[k] - m) * (c[k] - m);
                             double sd = sqrt(sq / 20); bbm[i] = m; bbu[i] = m + 2 * sd; bbl[i] = m - 2 * sd; okbb[i] = 1; }
         }
+        /* where each bar goes.  Standard candles: evenly spaced slots, all as wide as each other, the newest at the right.  Volume candles are drawn as KuCoin's chart draws
+         * them: a rule measured from screenshots of its chart against the real volumes of the minutes (volume-candles.txt): no candle is thinner than standard; the width
+         * starts to grow at the mean volume on show and grows with the logarithm of the volume, in an odd number of pixels (the wick is in the middle):
+         *     width / standard = max(1, 1.10 + 1.57 * ln(volume / mean volume on show))        (about 7.7 + 11 ln(volume / mean) pixels where the standard is 7)
+         * The candles do not overlap (the author, 2026-11-24: they do not in KuCoin): each keeps its own width and the standard gap, from the newest at the right to the left,
+         * so the wide ones take room and fewer candles are on show; the mean is taken over the ones on show (found by running the layout twice). */
+        int cw = W - U(8) - rpad;
+        int step = dn > 0 ? cw / dn : 4; if (step < 2) step = 2;
+        int bw = step - 1; if (bw % 2 == 0) bw--; if (bw < 1) bw = 1;       /* a body of an odd width has a middle pixel for the wick */
+        static int xl[MAX_BARS], cxs[MAX_BARS], bwid[MAX_BARS];
+        if (A.ind[3]) {
+            for (int pass = 0; pass < 2; pass++) {
+                double vm = 0; int vc = 0;
+                for (int i = base; i < n; i++) if (v[i] > 0) { vm += v[i]; vc++; }
+                vm = vc ? vm / vc : 0;
+                int gap = step - bw, cur = U(4) + cw, nb = n;
+                for (int i = n - 1; i >= 0; i--) {
+                    int wd = bw;
+                    if (vm > 0 && v[i] > 0) {
+                        double f = 1.10 + 1.57 * log(v[i] / vm);
+                        if (f < 1.0) f = 1.0;
+                        if (f > 4.0) f = 4.0;
+                        wd = 2 * (int)(((bw * f) - 1.0) / 2.0 + 0.5) + 1;                  /* the nearest odd number of pixels */
+                        if (wd < bw) wd = bw;
+                    }
+                    if (cur - wd < U(4) && nb < n) break;                                    /* no room for this one (the newest is always shown) */
+                    bwid[i] = wd; xl[i] = cur - wd; cxs[i] = xl[i] + wd / 2; cur = xl[i] - gap; nb = i;
+                }
+                base = nb; dn = n - base;
+            }
+        } else {
+            int x0 = U(4) + (cw - step * dn);                    /* the newest bar at the right */
+            for (int i = base; i < n; i++) { bwid[i] = bw; xl[i] = x0 + (i - base) * step; cxs[i] = xl[i] + bw / 2; }
+        }
         double hi = h[base], lo = l[base];
         for (int i = base + 1; i < n; i++) { if (h[i] > hi) hi = h[i]; if (l[i] < lo) lo = l[i]; }
         if (A.ind[0]) for (int i = base; i < n; i++) if (okbb[i]) { if (bbu[i] > hi) hi = bbu[i]; if (bbl[i] < lo) lo = bbl[i]; }
@@ -622,31 +673,8 @@ static void paint(HDC dc, int W, int H)
             range = hi - lo;
         }
         double pad = range * 0.04; hi += pad; lo -= pad; range = hi - lo;
-        int cw = W - U(8) - rpad, ch = bot - top;
+        int ch = bot - top;
         #define Y(p) (top + (int)((hi - (p)) / range * ch + 0.5))
-        int step = dn > 0 ? cw / dn : 4; if (step < 2) step = 2;
-        int bw = step - 1; if (bw % 2 == 0) bw--; if (bw < 1) bw = 1;       /* a body of an odd width has a middle pixel for the wick */
-        int x0 = U(4) + (cw - step * dn);                        /* the newest bar at the right */
-        /* where each bar goes: the slots are evenly spaced; standard candles are all as wide as each other.  Volume candles are drawn as KuCoin's chart draws them, a rule
-         * measured from two screenshots of its chart against the real volumes of the minutes (volume-candles.txt): no candle is thinner than standard (7 pixels there); the
-         * width starts to grow at the mean volume on show and grows with the logarithm of the volume, in an odd number of pixels:
-         *     width / standard = max(1, 1.10 + 1.57 * ln(volume / mean volume))        (about 7.7 + 11 ln(volume / mean) pixels where the standard is 7)
-         * The wide candles overlap their neighbours (the later is drawn over the earlier). */
-        static int xl[MAX_BARS], cxs[MAX_BARS], bwid[MAX_BARS];
-        double vmean = 0; int vcount = 0;
-        for (int i = base; i < n; i++) if (v[i] > 0) { vmean += v[i]; vcount++; }
-        vmean = vcount ? vmean / vcount : 0;
-        for (int i = base; i < n; i++) {
-            int slot = x0 + (i - base) * step, wd = bw;
-            if (A.ind[3] && vmean > 0 && v[i] > 0) {
-                double f = 1.10 + 1.57 * log(v[i] / vmean);
-                if (f < 1.0) f = 1.0;
-                if (f > 4.0) f = 4.0;
-                wd = 2 * (int)(((bw * f) - 1.0) / 2.0 + 0.5) + 1;                    /* the nearest odd number of pixels: the wick is in the middle */
-                if (wd < bw) wd = bw;
-            }
-            bwid[i] = wd; xl[i] = slot + (bw - wd) / 2; cxs[i] = xl[i] + wd / 2;
-        }
         HRGN clip = CreateRectRgn(0, top, W, bot); SelectClipRgn(dc, clip);          /* the lines stay in the chart */
         #define LINE(arr, okarr, col, style) do { HPEN pn = CreatePen(style, 1, col); HGDIOBJ op = SelectObject(dc, pn); int started = 0; \
             for (int i = base; i < n; i++) { if (!okarr[i]) { started = 0; continue; } int px = cxs[i], py = Y(arr[i]); \
@@ -684,6 +712,12 @@ static void paint(HDC dc, int W, int H)
         /* the line of the price now, in the colour of the candle that is forming */
         double mx = c[n - 1]; int ypl = Y(mx);
         { HPEN pen = CreatePen(PS_SOLID, 1, c[n - 1] >= o[n - 1] ? COL_UP : COL_DOWN); HGDIOBJ old = SelectObject(dc, pen); MoveToEx(dc, U(4), ypl, NULL); LineTo(dc, W - U(4), ypl); SelectObject(dc, old); DeleteObject(pen); }
+        if (A.m_in && !A.dragging && !A.editing && !A.go_on && A.my >= top && A.my <= bot) {          /* a line follows the mouse up and down, and the price under it is shown at the top, in the middle */
+            double pm = hi - (A.my - top) * range / ch;
+            HPEN pen = CreatePen(PS_DASH, 1, RGB(190, 198, 210)); HGDIOBJ old = SelectObject(dc, pen);
+            SetBkMode(dc, TRANSPARENT); MoveToEx(dc, 0, A.my, NULL); LineTo(dc, W, A.my); SelectObject(dc, old); DeleteObject(pen);
+            fmt_price(pm, buf, sizeof buf); text(dc, fp, COL_TXT, W / 2, U(1), buf, 2);
+        }
         if (failed) text(dc, fs, COL_DOWN, U(5), top - U(1), "no connection: showing the last data", 0);          /* the chart stays, as it was */
         else if (age > 20000) { snprintf(buf, sizeof buf, "%d s old", (int)(age / 1000)); text(dc, fs, COL_ENTRY, U(5), top - U(1), buf, 0); }
         else if (!complete) text(dc, fs, COL_DIM, U(5), top - U(1), "history loading", 0);
@@ -760,7 +794,7 @@ static void paint(HDC dc, int W, int H)
         text(dc, fs, COL_DIM, U(6), fy + U(22), buf, 0);
     } else {
         text(dc, fn, COL_DIM, U(6), fy + U(4), "no position", 0);
-        text(dc, fs, COL_DIM, U(6), fy + U(22), A.active ? "e enter a position   q quit" : "click, then e to enter a position", 0);
+        text(dc, fs, COL_DIM, U(6), fy + U(22), A.active ? "e enter a position   q quit" : "hover, then e to enter a position", 0);
     }
     for (int k = 0; k < 4; k++) {                                /* the toggles: a filled dot is on, a ring is off */
         int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r);
@@ -775,19 +809,11 @@ static void paint(HDC dc, int W, int H)
         rect(dc, W / 3, H - U(17), cx - U(8), H - U(2), COL_BG);
         text(dc, fs, IND_COL[A.hover], cx - U(10), H - U(16), lab, 1);
     }
-    if (A.active) {                                              /* the window has the keyboard */
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(70, 130, 200)); HGDIOBJ oldp = SelectObject(dc, pen), oldb = SelectObject(dc, GetStockObject(NULL_BRUSH));
-        Rectangle(dc, 0, 0, W, Hf); SelectObject(dc, oldp); SelectObject(dc, oldb); DeleteObject(pen);
-    }
     draw_heat(dc, W, H, Hf, u, fs);
     DeleteObject(fb); DeleteObject(fn); DeleteObject(fs); DeleteObject(fp); DeleteObject(fx); DeleteObject(fx);
     #undef U
     #undef Y
 }
-
-static int win_w(void) { return BASE_W * A.scale / 100; }
-static int win_h(void) { return (BASE_H + HEAT_H) * A.scale / 100; }
-static int core_h(void) { return BASE_H * A.scale / 100; }          /* the window without the heat strip */
 
 static int save_bmp(const char *file, int W, int H)
 {
@@ -818,7 +844,28 @@ static void resize_window(void)
     InvalidateRect(A.hwnd, NULL, FALSE);
 }
 
-static void set_passive(int passive)             /* WS_EX_NOACTIVATE: a click must not take the keyboard unless asked */
+static void give_up_keyboard(void);
+static void set_full(int on)                     /* f: the window covers its monitor; leaving puts it back where it was, at its size */
+{
+    if (on == A.full || !A.hwnd) return;
+    if (on) {
+        MONITORINFO mi; memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi;
+        if (!GetMonitorInfo(MonitorFromWindow(A.hwnd, MONITOR_DEFAULTTONEAREST), &mi)) return;
+        GetWindowRect(A.hwnd, &A.rest);
+        A.fw = mi.rcMonitor.right - mi.rcMonitor.left; A.fh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        A.full = 1;
+        SetWindowPos(A.hwnd, HWND_TOPMOST, mi.rcMonitor.left, mi.rcMonitor.top, A.fw, A.fh, SWP_NOACTIVATE);
+    } else {
+        A.full = 0;
+        SetWindowPos(A.hwnd, HWND_TOPMOST, A.rest.left, A.rest.top, win_w(), win_h(), SWP_NOACTIVATE);
+        POINT pt; RECT r; GetCursorPos(&pt); GetWindowRect(A.hwnd, &r);
+        if (A.active && !PtInRect(&r, pt)) give_up_keyboard();          /* the keyboard is held only while the mouse is over the window */
+    }
+    InvalidateRect(A.hwnd, NULL, FALSE);
+    wake();
+}
+
+static void set_passive(int passive)             /* WS_EX_NOACTIVATE: the window takes the keyboard only when asked (the mouse over it, a click) */
 {
     LONG_PTR ex = GetWindowLongPtr(A.hwnd, GWL_EXSTYLE);
     if (passive) ex |= WS_EX_NOACTIVATE; else ex &= ~(LONG_PTR)WS_EX_NOACTIVATE;
@@ -831,8 +878,14 @@ static void take_keyboard(void)
     HWND fg = GetForegroundWindow();
     A.prev = (fg && fg != A.hwnd) ? fg : NULL;
     set_passive(0);
+    /* Windows lets a program take the foreground only after input it received; a mouse that merely moved over the window is not that, so borrow the input of the thread that has it */
+    DWORD me = GetCurrentThreadId(), they = fg ? GetWindowThreadProcessId(fg, NULL) : 0;
+    int att = they && they != me && AttachThreadInput(me, they, TRUE);
     SetForegroundWindow(A.hwnd);
     SetFocus(A.hwnd);
+    if (att) AttachThreadInput(me, they, FALSE);
+    if (GetForegroundWindow() != A.hwnd) { set_passive(1); A.prev = NULL; return; }       /* refused: try again at the next movement of the mouse */
+    A.declined = 0;
     A.active = 1;
     InvalidateRect(A.hwnd, NULL, FALSE);
 }
@@ -850,7 +903,7 @@ static void give_up_keyboard(void)
 static void show_hide(int show)
 {
     if (show) { A.hidden = 0; ShowWindow(A.hwnd, SW_SHOWNOACTIVATE); SetWindowPos(A.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); wake(); }
-    else { give_up_keyboard(); A.hidden = 1; ShowWindow(A.hwnd, SW_HIDE); }
+    else { set_full(0); give_up_keyboard(); A.hidden = 1; ShowWindow(A.hwnd, SW_HIDE); }
 }
 
 static HICON make_icon(void)
@@ -959,7 +1012,7 @@ static void commit_edit(void)                     /* Enter, or the mouse leaving
     InvalidateRect(A.hwnd, NULL, FALSE);
 }
 
-static void quit_app(void) { save_all(); tray_del(); A.quit = 1; wake(); DestroyWindow(A.hwnd); }
+static void quit_app(void) { set_full(0); save_all(); tray_del(); A.quit = 1; wake(); DestroyWindow(A.hwnd); }
 
 /*
  * Snap a window rectangle that is being dragged: whenever an edge of the window comes within SNAP pixels of an edge of the screen's usable area, from any direction
@@ -1021,7 +1074,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     switch (m) {
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
-        int W = win_w(), H = win_h();
+        int W = cli_w(), H = cli_h();
         HDC mem = CreateCompatibleDC(dc); HBITMAP bm = CreateCompatibleBitmap(dc, W, H); HGDIOBJ old = SelectObject(mem, bm);
         paint(mem, W, H);
         BitBlt(dc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
@@ -1038,18 +1091,19 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         if (A.shot && !A.shot_done) {
             EnterCriticalSection(&A.cs); int ready = A.have && A.complete; LeaveCriticalSection(&A.cs);
-            static int tries; if (ready || ++tries > 12) { A.shot_done = 1; save_bmp(A.shot, win_w(), win_h()); quit_app(); }
+            static int tries; if (ready || ++tries > 12) { A.shot_done = 1; save_bmp(A.shot, cli_w(), cli_h()); quit_app(); }
         }
         return 0;
     case WM_MOUSEACTIVATE: return A.active ? MA_ACTIVATE : MA_NOACTIVATE;
     case WM_LBUTTONDOWN: {
-        int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = win_w(), H = core_h(); double u = W / (double)BASE_W;
+        int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = cli_w(), H = core_h(); double u = ui_u();
         for (int k = 0; k < 4; k++) {                                          /* a click on a dot toggles it */
             int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r);
             if (abs(mx - cx) <= r + 3 && abs(my - cy) <= r + 3) { A.ind[k] = !A.ind[k]; save_all(); InvalidateRect(h, NULL, FALSE); return 0; }
         }
         }
         take_keyboard();
+        if (A.full) return 0;                                                      /* no dragging a full screen */
         /* a click and drag moves the window, by a drag of its own and not Windows' move loop: the position is always the window's at the start plus how far the cursor has moved,
          * with the snap applied to that, so nothing adds up from one step to the next (the system's loop built each position on the last one, and the snapping drifted) */
         A.dragging = 1; GetCursorPos(&A.drag_c0); GetWindowRect(h, &A.drag_r0); SetCapture(h);
@@ -1081,14 +1135,17 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             SetWindowPos(h, NULL, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             return 0;
         }
-        int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = win_w(), H = core_h(), hv = -1; double u = W / (double)BASE_W;
+        int mx = (short)LOWORD(l), my = (short)HIWORD(l), W = cli_w(), H = core_h(), hv = -1; double u = ui_u();
         for (int k = 0; k < 4; k++) { int cx, cy, r; dot_pos(k, W, H, u, &cx, &cy, &r); if (abs(mx - cx) <= r + 3 && abs(my - cy) <= r + 3) hv = k; }
         if (hv != A.hover) { A.hover = hv; InvalidateRect(h, NULL, FALSE); }
+        if (!A.m_in || my != A.my) { A.my = my; A.m_in = 1; InvalidateRect(h, NULL, FALSE); }      /* the line follows the mouse */
         }
         if (!A.tracking) { TRACKMOUSEEVENT te = { sizeof te, TME_LEAVE, h, 0 }; TrackMouseEvent(&te); A.tracking = 1; }
+        if (!A.active && !A.declined && !A.shot && !A.hidden) take_keyboard();            /* the mouse over the window gives it the keyboard, no click needed */
         return 0;
     case WM_MOUSELEAVE:
-        A.tracking = 0;
+        A.tracking = 0; A.declined = 0;
+        if (A.m_in) { A.m_in = 0; InvalidateRect(h, NULL, FALSE); }
         if (A.hover != -1) { A.hover = -1; InvalidateRect(h, NULL, FALSE); }
         if (A.active && !A.dragging) {                                              /* the mouse out of the window: it gives the keyboard back at once, */
             if (A.editing) commit_edit();                                           /* and that, like Enter, means the position has been entered */
@@ -1096,7 +1153,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             give_up_keyboard();
         }
         return 0;
-    case WM_KILLFOCUS: if (A.active && !A.dragging) { A.active = 0; A.editing = 0; A.go_on = 0; set_passive(1); InvalidateRect(h, NULL, FALSE); } return 0;
+    case WM_KILLFOCUS: if (A.active && !A.dragging) { A.active = 0; A.editing = 0; A.go_on = 0; set_passive(1); A.declined = 1; set_full(0); InvalidateRect(h, NULL, FALSE); } return 0;      /* another window took the keyboard: out of full screen */
     case WM_KEYDOWN:
         if (A.go_on) {                                                              /* the 'g' box */
             int m[5], nm = go_matches(m), len = (int)strlen(A.go_buf);
@@ -1127,7 +1184,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         case VK_DOWN: change_tf(-1); break;
         case VK_RIGHT: change_pair(1); break;
         case VK_LEFT: change_pair(-1); break;
-        case VK_ESCAPE: give_up_keyboard(); break;
+        case VK_ESCAPE: if (A.full) set_full(0); else { A.declined = 1; give_up_keyboard(); } break;
         case VK_DELETE: { Position *p = cur_pos(); p->entry = p->size = 0; save_pos(A.pair, p); InvalidateRect(h, NULL, FALSE); break; }
         }
         return 0;
@@ -1161,10 +1218,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         case 'e': case 'E': open_editor(); break;
         case 'g': case 'G': A.go_on = 1; A.go_buf[0] = 0; A.go_cur = 0; A.go_sel = 0; InvalidateRect(h, NULL, FALSE); break;       /* go straight to a ticker */
         case 't': case 'T': show_hide(0); break;
-        case '+': case '=': if (A.scale < 400) { A.scale += 25; resize_window(); save_all(); wake(); } break;
-        case '-': if (A.scale > 75) { A.scale -= 25; resize_window(); save_all(); wake(); } break;
+        case 'f': case 'F': set_full(!A.full); break;
+        case '+': case '=': if (A.full) { if (A.fscale < 400) { A.fscale += 25; InvalidateRect(h, NULL, FALSE); save_all(); } } else if (A.scale < 400) { A.scale += 25; resize_window(); save_all(); wake(); } break;
+        case '-': if (A.full) { if (A.fscale > 75) { A.fscale -= 25; InvalidateRect(h, NULL, FALSE); save_all(); } } else if (A.scale > 75) { A.scale -= 25; resize_window(); save_all(); wake(); } break;
         }
         return 0;
+    case WM_DISPLAYCHANGE: set_full(0); return 0;              /* the screen changed (resolution, a monitor gone): back to the small window */
     case WM_HOTKEY: show_hide(A.hidden); return 0;
     case WM_POWERBROADCAST:                                    /* the laptop suspends and resumes: the connection to the server is gone; make a new one at the next poll */
         if (w == PBT_APMRESUMEAUTOMATIC || w == PBT_APMRESUMESUSPEND || w == PBT_APMSUSPEND) InterlockedExchange(&g_reset, 1);
@@ -1207,6 +1266,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
       snprintf(now_sv, sizeof now_sv, "%s:%d", A.host, A.port); if (!strcmp(forb, now_sv)) snprintf(A.ip, sizeof A.ip, "%s", ipb); }
     A.field_last = GetPrivateProfileIntA("wincan", "editfield", 0, A.ini); A.ind[0] = GetPrivateProfileIntA("wincan", "bollinger", 1, A.ini); A.ind[1] = GetPrivateProfileIntA("wincan", "ma9", 1, A.ini); A.ind[2] = GetPrivateProfileIntA("wincan", "ma200", 1, A.ini); A.ind[3] = GetPrivateProfileIntA("wincan", "volcandles", 0, A.ini); A.hover = -1;
     A.scale = GetPrivateProfileIntA("wincan", "scale", 100, A.ini); if (A.scale < 75 || A.scale > 400) A.scale = 100;
+    A.fscale = GetPrivateProfileIntA("wincan", "fullscale", 200, A.ini); if (A.fscale < 75 || A.fscale > 400) A.fscale = 200;
     int server_given = 0, argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; i++) {
         char a[256]; WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, a, sizeof a, NULL, NULL);
@@ -1219,6 +1279,8 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
         else if (!strcmp(a, "--shot-active")) A.shot_active = 1;
         else if (!strcmp(a, "--shot-go") && i + 1 < argc) { snprintf(A.go_buf, sizeof A.go_buf, "%s", nx); A.go_cur = (int)strlen(A.go_buf); A.shot_go = 1; i++; }
         else if (!strcmp(a, "--scale") && i + 1 < argc) { A.scale = atoi(nx); i++; }
+        else if (!strcmp(a, "--shot-full") && i + 1 < argc) { int fw = 0, fh = 0; if (sscanf(nx, "%dx%d", &fw, &fh) == 2 && fw > 0 && fh > 0) { A.full = 1; A.fw = fw; A.fh = fh; } i++; }
+        else if (!strcmp(a, "--shot-mouse") && i + 1 < argc) { A.my = atoi(nx); A.m_in = 1; i++; }
         else if (!strcmp(a, "--test-close")) A.test_close = 1;
         else if (!strcmp(a, "--test-snap") && i + 1 < argc) { exit(test_snap(nx) ? 1 : 0); }
         else if (!strcmp(a, "--shot-editor")) A.shot_editor = 1;

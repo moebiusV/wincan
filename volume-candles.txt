@@ -27,5 +27,5 @@ the two, so the width starts to grow at about the mean volume; and it grows with
 
 The rule now used (88 candles located in all, widths within the odd-number quantisation of KuCoin's):
       width / standard = max(1, 1.10 + 1.57 * ln(volume / mean volume on show))      as an odd number of pixels
-i.e. about 7.7 + 11 ln(volume / mean) pixels where the standard is 7 pixels; it reaches 3.4 times the standard width at 4.3 times the mean volume.  The spacing of the
-candles is even and the wide ones overlap their neighbours.  More reference screenshots (other pairs, zoom levels, a quiet stretch) would make it closer still.
+i.e. about 7.7 + 11 ln(volume / mean) pixels where the standard is 7 pixels; it reaches 3.4 times the standard width at 4.3 times the mean volume.  Correction (2026-11-24, the author): the candles do not overlap in KuCoin's chart.  Each keeps its own width, side by side with the standard gap, so the wide ones take room and fewer candles are on show; the spacing of the
+candles is therefore not even.  More reference screenshots (other pairs, zoom levels, a quiet stretch) would make it closer still.

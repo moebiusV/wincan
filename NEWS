@@ -29,3 +29,7 @@ wincan 0.1.0 (2026-11-20)
   wincan reconnects by itself after the computer suspends and resumes.
   The heat strip along the bottom of wincan: modelled long and short liquidations at 1, 2, 5, 10 and 20 per cent, with the centre of gravity (two ways).
   Arrow keys inside the position boxes; the g key: go straight to a ticker, with auto-complete.
+  f toggles full screen (the monitor the window is on; its place and size come back on f, Esc, or anything that breaks out of it); fullscale in wincan.ini; + and - size the text there.
+  A dashed line follows the mouse up and down the chart (small window and full screen) and the price under it is shown at the top centre.
+  The window takes the keyboard when the mouse is over it (no click needed), and no longer draws a blue border while it has it.
+  Volume candles no longer overlap (they do not in KuCoin): each keeps its own width, side by side, so fewer candles are on show when some are wide.

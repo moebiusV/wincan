@@ -12,9 +12,8 @@ server, in a 300 by 175 pixel window with no frame, border or title bar that sta
 refreshes once a second.  If a position (an entry price and a size) is entered, it shows the profit or loss as a percentage and
 in dollars, green when ahead and red when behind, and draws the entry price as a dotted line.
 .SS Keyboard and focus
-The window never takes the keyboard by itself.  Click it (and drag to move it) to give it the keyboard; a blue border shows that it
-has it.  Move the mouse out of the window and it gives the keyboard back at once to the window that had it (except while an entry or
-size is being typed).
+The window takes the keyboard when the mouse comes over it, with no click (nothing is drawn around it to show that it has the keyboard).  Move the mouse out of the window and it gives the keyboard back at once to the window that had it (except while an entry or
+size is being typed).  If the keyboard is given up with the mouse still over the window (Esc, or another window taken with Alt+Tab), the window does not take it back until the mouse has left and come again, or it is clicked.
 .TP
 .B Up, Down
 the timeframe: 1m 3m 5m 15m 30m 1h 4h 1d 1w.
@@ -34,8 +33,11 @@ clear the position of this coin.
 .B t
 hide the window in the tray.
 .TP
+.B f
+toggle full screen: the window covers the whole monitor it is on and f again puts it back.  The window's place and size are remembered, and whatever else ends full screen (Esc, another window taking the keyboard, hiding to the tray, quitting, a change of the display) puts it back at the same place and size.  The chart fills the screen with its text at the full screen magnification (see \fBfullscale\fR in wincan(5)); no more than 295 candles are shown (the server sends 500 and the 200\-period average needs 200 of them), so on a wide screen they are wider than in the small window.  The window cannot be dragged in full screen, and it is never in full screen when started.
+.TP
 .B + , \-
-make the window larger or smaller (75% to 400%).
+make the window larger or smaller (75% to 400%); in full screen, the magnification of the text (the window itself keeps its size for when it comes back).
 .TP
 .B q
 quit the program.
@@ -44,10 +46,11 @@ quit the program.
 close the trade of the coin on show at the current price (the mark) and log it, see TRADE LOG.
 .TP
 .B Esc
-give the keyboard back.
+leave full screen; otherwise (and first, to close the editor or the go\-to box if one is open) give the keyboard back.
 The line across the window at the latest price is green when the candle forming is up and red when it is down.  The highest high and the lowest low of the bars on show are each marked by a dotted line across the window with its value at the left.
+A dashed horizontal line follows the mouse up and down the chart, in the small window and in full screen, and the price under it is shown at the top, in the middle.
 .SS Indicators
-Small dots at the bottom right switch the Bollinger bands (20 periods, 2 standard deviations; violet), the 9\-period moving average (orange) and the 200\-period moving average (blue).  A filled dot is on, a ring is off; hover over a dot for its name, click it to switch it.  They are kept in the settings.  A fourth, white dot switches the volume candles, drawn as KuCoin's chart draws them (the rule was measured from two of its screenshots against the real volumes, see volume-candles.txt in the sources): no candle is thinner than a standard one; the width starts to grow at the mean volume on show and grows with the logarithm of the volume, as max(1, 1.10 + 1.57 ln(volume/mean)) times the standard width, in an odd number of pixels; wide candles overlap their neighbours.  The standard candles are all as wide as each other.
+Small dots at the bottom right switch the Bollinger bands (20 periods, 2 standard deviations; violet), the 9\-period moving average (orange) and the 200\-period moving average (blue).  A filled dot is on, a ring is off; hover over a dot for its name, click it to switch it.  They are kept in the settings.  A fourth, white dot switches the volume candles, drawn as KuCoin's chart draws them (the rule was measured from two of its screenshots against the real volumes, see volume-candles.txt in the sources): no candle is thinner than a standard one; the width starts to grow at the mean volume on show and grows with the logarithm of the volume, as max(1, 1.10 + 1.57 ln(volume/mean)) times the standard width, in an odd number of pixels; the candles do not overlap: each keeps its own width, side by side, so the wide ones take room and fewer candles are on show.  The standard candles are all as wide as each other.
 .SS Moving
 Click and drag anywhere to move the window.  Nothing keeps it on the screen, it may be dragged partly off, but whenever an edge of the window comes within 11 pixels (as the program sees them: Windows scales them with the screen, so on a screen scaled to 150% that is about 17 pixels on the glass) of an edge of the usable screen (the taskbar's edge counts), from inside or from outside, the two snap together: the window sits flush inside the edge, or flush just outside it; and it lets go again when taken further than that.
 .SS Tray and Alt-Tab
@@ -74,6 +77,12 @@ start with this coin and timeframe.
 .TP
 .BI \-\-shot " FILE.bmp"
 draw once and write the picture to a file, then exit (for testing; with \fB\-\-shot\-position\fR \fIENTRY,SIZE\fR and \fB\-\-shot\-active\fR).
+.TP
+.BI \-\-shot\-full " WIDTHxHEIGHT"
+with \fB\-\-shot\fR, draw the full screen layout for a monitor of that size.
+.TP
+.BI \-\-shot\-mouse " Y"
+draw the line that follows the mouse as if the mouse were at that height.
 .SH FILES
 .TP
 .B %APPDATA%\\wincan\\wincan.ini
