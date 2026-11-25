@@ -20,10 +20,24 @@ echo "# no settings" > "$T/empty.conf"
 
 # start candled on a loopback port with the given sources; PORT is set; waits until it answers
 start() {
-    PORT=$(( 20000 + $(od -An -N2 -tu2 /dev/urandom | tr -d ' ') % 30000 ))
-    "$CANDLED" --config "$T/empty.conf" --no-tls --bind 127.0.0.1 --port "$PORT" "$@" >"$T/log" 2>&1 &
-    PID=$!
-    i=0; while [ $i -lt 60 ]; do curl -s --max-time 1 "http://127.0.0.1:$PORT/pairs" >/dev/null 2>&1 && break; sleep 0.1; i=$((i + 1)); done
+    tries=0
+    while [ $tries -lt 8 ]; do
+        PORT=$(( 20000 + $(od -An -N2 -tu2 /dev/urandom | tr -d ' ') % 30000 ))
+        "$CANDLED" --config "$T/empty.conf" --no-tls --bind 127.0.0.1 --port "$PORT" "$@" >"$T/log" 2>&1 &
+        PID=$!
+        i=0
+        while [ $i -lt 50 ]; do
+            kill -0 "$PID" 2>/dev/null || break                          # it died (port in use?): try another port
+            if curl -s --max-time 1 "http://127.0.0.1:$PORT/pairs" >/dev/null 2>&1; then
+                kill -0 "$PID" 2>/dev/null && return 0                   # answered, and by our process
+                break
+            fi
+            sleep 0.1; i=$((i + 1))
+        done
+        kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; PID=""
+        tries=$((tries + 1))
+    done
+    echo "candled would not start: $(cat "$T/log")"; exit 1
 }
 stop() { kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; PID=""; }
 
