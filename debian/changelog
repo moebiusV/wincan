@@ -1,3 +1,10 @@
+wincan (1.1.0-1) unstable; urgency=medium
+
+  * wincan makes its own key (and asks for the server) at the first start;
+    plain HTTP is for this computer only, in the client as in the server.
+
+ -- David Walther <david@clearbrookdistillery.com>  Tue, 24 Nov 2026 22:50:11 -0800
+
 wincan (1.0.0-1) unstable; urgency=medium
 
   * First release: candled with a configuration file, TLS and client keys,

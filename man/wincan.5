@@ -27,6 +27,9 @@ New\-SelfSignedCertificate \-Subject "CN=wincan client" \-KeyAlgorithm ECDSA_nis
 (with the client authentication usage); the thumbprint it prints is the value of client_cert.
 The private key stays in the store.  \fBwincan \-\-fingerprint\fR prints the certificate's SHA\-256 fingerprint, which the server's administrator authorizes (\fBcandled \-\-authorize\fR).
 .TP
+.B key_prompt
+1 (the default) offers to make a key at the start when the server is https:// and there is none; 0 once the offer has been declined.
+.TP
 .B server_pin
 .TQ
 .B server_pin_for

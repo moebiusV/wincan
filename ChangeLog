@@ -51,3 +51,6 @@
 2026-11-24  wincan: https:// servers, the client key in the certificate store, the pinned server certificate; --fingerprint, --help, --version.
 2026-11-24  Autotools (configure.ac, Makefile.am, bootstrap); man pages candled.conf(5) and candle-protocol(7); windows/install.ps1, uninstall.ps1, install.cmd;
             linux/install-candled.sh; debian/; contrib/wincan.spec and contrib/APKBUILD (untested); HACKING, THANKS, INSTALL.
+2026-11-25  wincan: --gen-key and the first-start offer to make the key (CNG ECDSA P-256 in the user's store, a self-signed certificate with the client authentication
+            usage, the thumbprint in wincan.ini, the fingerprint in client-fingerprint.txt and its authorize command on the clipboard); the first-start box for the server;
+            plain HTTP only to a loopback host; key_prompt in wincan.ini.  Release 1.1.0.

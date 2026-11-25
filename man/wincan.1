@@ -65,6 +65,10 @@ When a trade is closed with
 one line is appended to
 .B %APPDATA%\\wincan\\trades.csv
 (a header line is written first): the time closed, the coin, long or short, the leverage, the entry and the size, the time opened, the exit price, the unrealized profit or loss, the realized one, their total, the margin (the value of the position divided by the leverage, or the whole value if none was given), the return on the margin in per cent, the highest and lowest price since entry with the time of each, the best and the worst the trade went through from the entry (the maximum favorable and maximum adverse excursion, in per cent of the margin and in dollars) and the duration in seconds.  The highest and lowest prices are asked of the server, so they are right even if the window was not running meanwhile.  While a position is open the window shows the best and worst so far.
+.SH FIRST START
+With no settings yet, wincan asks where the candles come from (a small box: the address of the candle server, \fBhttps://HOST:8766\fR).  If that server is https:// and this computer has no key, it offers to make one: Windows' own key storage makes an ECDSA P\-256 key that cannot be copied out, wincan puts a self\-signed certificate for it in the user's personal certificate store, writes its thumbprint to wincan.ini (\fBclient_cert\fR) and its SHA\-256 fingerprint to \fBclient\-fingerprint.txt\fR beside it, and puts \fBcandled \-\-authorize SHA256:...\fR on the clipboard: the server's administrator runs that command, and wincan connects.  Answering no is remembered (\fBkey_prompt\fR in wincan.ini); \fB\-\-gen\-key\fR makes the key whenever it is wanted.
+.PP
+Plain HTTP (a server written without https://) is for this computer only: wincan refuses it for any other host, as candled does.  There is no fallback from https to plain HTTP.
 .SH ONE COPY
 Only one copy runs: starting a second finds the first, shows its window (it may be hidden in the tray) and exits.
 .SH OPTIONS
@@ -74,6 +78,9 @@ the candle supply (also kept in the settings file).  With https:// the connectio
 .TP
 .B \-\-fingerprint
 print the SHA\-256 fingerprint of this computer's key, for \fBcandled \-\-authorize\fR, and exit.
+.TP
+.B \-\-gen\-key
+make this computer's key, if it has none, without asking, print its fingerprint (and put \fBcandled \-\-authorize\fR with it on the clipboard), and exit.
 .TP
 .BR \-\-help ", " \-\-version
 display help or version information and exit (on the console that started wincan, else in a message box).

@@ -1,3 +1,10 @@
+wincan 1.1.0 (2026-11-25)
+  A smooth first start: with no settings wincan asks where the candles come from (a small box); with an https:// server and no key it offers to make
+  the computer's key (one Yes or No; "no" is remembered), keeps it in Windows' key storage, and puts the command for the server's administrator on
+  the clipboard (candled --authorize SHA256:...).  wincan --gen-key makes the key without any question.  The PowerShell installer is optional.
+  Plain HTTP is for this computer only in the client too: wincan refuses a plain connection to any other host (candled already did).  There is no
+  fallback from TLS to plain HTTP, in either program, by decision: client and server are the same version and both encrypted.
+
 wincan 1.0.0 (2026-11-24)
   The first release of the package: candled, the candle server for Linux (Debian, Ubuntu, Fedora and relatives, Alpine, WSL2), and wincan.exe,
   the candle window for the Windows desktop, with an installer for each.

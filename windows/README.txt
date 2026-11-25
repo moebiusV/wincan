@@ -4,6 +4,10 @@ wincan for Windows
 wincan.exe is one file with no dependency: it needs only what Windows has.  install.ps1 puts it in a folder
 of its own, adds the Start Menu entry and Win+R, and sets up the encrypted connection to a candle server.
 
+You do not need the installer: run wincan.exe.  The first time it asks where the candles come from (the server's address,
+https://HOST:8766), offers to make this computer's key (one Yes or No) and puts the command for the server's administrator
+on the clipboard.  The installer below adds the Start Menu entry and Win+R, and can do the same things up front.
+
 Install (PowerShell, no administrator rights needed):
 
     powershell -ExecutionPolicy Bypass -File install.ps1 -Server https://HOST:8766 -ServerPin SHA256:... -Launch

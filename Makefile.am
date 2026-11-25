@@ -32,7 +32,7 @@ dist_check_SCRIPTS = tests/test_tls.sh tests/no-private.sh
 
 # ---------------------------------------------------------------- wincan.exe, the window (a Windows program, built with MinGW-w64)
 WINCFLAGS = -O2 -std=gnu11 -Wall -Wextra
-WINLIBS = -lgdi32 -lwinhttp -lshell32 -luser32 -lws2_32 -lcrypt32 -lbcrypt
+WINLIBS = -lgdi32 -lwinhttp -lshell32 -luser32 -lws2_32 -lcrypt32 -lbcrypt -lncrypt
 
 if BUILD_WINCAN
 wincan.exe: $(srcdir)/src/wincan.c $(srcdir)/src/gomatch.h Makefile

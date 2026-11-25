@@ -69,11 +69,15 @@ wincan only needs *a candle supply*. `candled` is one; anything that speaks the 
 
 ### Windows: the window
 
-Download `wincan-1.0.0-win64.zip` from the [latest release](https://github.com/moebiusV/wincan/releases/latest), unpack it, open PowerShell in the unpacked folder, and run:
+Download `wincan-1.1.0-win64.zip` from the [latest release](https://github.com/moebiusV/wincan/releases/latest), unpack it, open PowerShell in the unpacked folder, and run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File install.ps1 -Server https://HOST:8766 -ServerPin SHA256:... -Launch
 ```
+
+You do not need the installer: **just run `wincan.exe`**. The first time, it asks where the candles come from, offers to make this
+computer's key (one Yes or No), and puts the `candled --authorize ...` command on your clipboard for the server's administrator.
+`wincan.exe --gen-key` does it without asking. The installer adds the Start Menu entry and Win+R and can do the same up front.
 
 No administrator rights are needed. It puts `wincan.exe` in `%LOCALAPPDATA%\Programs\wincan`, adds a Start Menu entry and
 **Win+R** `wincan`, makes this computer's key, and prints its fingerprint for the server's administrator to authorize.
@@ -83,7 +87,7 @@ No administrator rights are needed. It puts `wincan.exe` in `%LOCALAPPDATA%\Prog
 ### Linux (Debian, Ubuntu, Fedora, Alpine, WSL2): the candle supply
 
 ```sh
-tar xf wincan-1.0.0.tar.gz && cd wincan-1.0.0
+tar xf wincan-1.1.0.tar.gz && cd wincan-1.1.0
 sudo sh linux/install-candled.sh          # builds, installs, makes the service user and the server key, starts the service
 ```
 
@@ -112,7 +116,7 @@ candled has **no passwords**. It works the way an IRC bouncer handles a client c
 3. A client whose fingerprint is not on the list **gets no answer**; the refusal is logged with its fingerprint, which is what you pass to `--authorize`.
 4. The client **pins the server's certificate** by its fingerprint, so there is no certificate authority to trust and nothing to be fooled by.
 
-Everything is TLS 1.2 or later. candled listens on **127.0.0.1** by default and refuses to serve plain HTTP on any other address unless you say `insecure yes`.
+Everything is TLS 1.2 or later, and **there is no fallback to plain HTTP**, in either program: a client and its server speak TLS or nothing. candled listens on **127.0.0.1** by default and refuses to serve plain HTTP on any other address unless you say `insecure yes`; wincan refuses plain HTTP to any host but this computer.
 ([candled(8)](man/candled.8), SECURITY)
 
 ## Using wincan

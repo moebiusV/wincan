@@ -13,6 +13,7 @@
 #include <winhttp.h>
 #include <wincrypt.h>
 #include <bcrypt.h>
+#include <ncrypt.h>
 #include <shellapi.h>
 #include <stdio.h>
 #include <ctype.h>
@@ -23,7 +24,7 @@
 #include <time.h>
 
 #ifndef PACKAGE_VERSION
-#define PACKAGE_VERSION "1.0.0"
+#define PACKAGE_VERSION "1.1.0"
 #endif
 
 #define WM_DATA     (WM_APP + 1)
@@ -55,6 +56,7 @@ static struct {
     char   host[128]; int port;
     int    tls;                           /* the server is https://: the client key proves who we are, the server's certificate is pinned */
     char   pin[72], pin_for[200], client_cert[48];      /* the pinned SHA-256 of the server's certificate (and the server it is for); the thumbprint of the client's certificate */
+    int    key_prompt, first_run;                  /* offer to make a key when there is none (the user can say no once and for all); no settings yet: ask for the server */
     char   err[96];                       /* what is wrong with the connection, in words that fit the window */
     char   pair[24]; int tf;
     int    scale;                         /* percent: 100 = 200x200 */
@@ -159,6 +161,7 @@ static void save_all(void)
     WritePrivateProfileStringA("wincan", "ma200", A.ind[2] ? "1" : "0", A.ini);
     WritePrivateProfileStringA("wincan", "volcandles", A.ind[3] ? "1" : "0", A.ini);
     snprintf(b, sizeof b, "%s%s:%d", A.tls ? "https://" : "", A.host, A.port); WritePrivateProfileStringA("wincan", "server", b, A.ini);
+    WritePrivateProfileStringA("wincan", "key_prompt", A.key_prompt ? "1" : "0", A.ini);
     snprintf(b, sizeof b, "%d", A.fscale); WritePrivateProfileStringA("wincan", "fullscale", b, A.ini);
     RECT r; int have_r = 0;
     if (A.hwnd && !A.shot) { if (A.full) { r = A.rest; have_r = 1; } else have_r = GetWindowRect(A.hwnd, &r) != 0; }      /* in full screen the place kept is the small window's */
@@ -271,6 +274,152 @@ static int check_pin(HINTERNET r)
     return 1;
 }
 
+/* plain HTTP is for this computer only (as candled's is): a name that is not the loopback is refused, not fallen back to */
+static int is_loopback_host(const char *h)
+{
+    return !_stricmp(h, "localhost") || !strncmp(h, "127.", 4) || !strcmp(h, "::1") || !strcmp(h, "[::1]");
+}
+
+/* ---------------------------------------------------------------- making the key */
+
+/* The key: an ECDSA P-256 key made by Windows' own key storage (it cannot be copied out) and a self-signed certificate for it,
+ * with the client authentication usage, 20 years, put in the user's personal store.  thumb gets the certificate's SHA-1
+ * thumbprint (what client_cert in wincan.ini holds), fp its SHA-256 fingerprint (what the server is told). */
+static int gen_client_key(char thumb[48], char fp[72], char *err, size_t ecap)
+{
+    NCRYPT_PROV_HANDLE prov = 0; NCRYPT_KEY_HANDLE key = 0; HCERTSTORE st = NULL; PCCERT_CONTEXT cert = NULL;
+    BYTE *subj = NULL, *eku = NULL, *ku = NULL; DWORD nsubj = 0, neku = 0, nku = 0, n; int ok = 0;
+    BYTE rnd[8], hash[20], h256[32]; wchar_t container[64], name[200], user[64] = L"user", host[64] = L"pc";
+    SECURITY_STATUS ss; SYSTEMTIME t0, t1; FILETIME ft; ULARGE_INTEGER u;
+    #define FAIL(what) do { snprintf(err, ecap, "%s (error 0x%08lx)", what, (unsigned long)(ss ? ss : (SECURITY_STATUS)GetLastError())); goto out; } while (0)
+    ss = 0;
+    BCryptGenRandom(NULL, rnd, sizeof rnd, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    _snwprintf(container, 64, L"wincan-client-%02x%02x%02x%02x%02x%02x%02x%02x", rnd[0], rnd[1], rnd[2], rnd[3], rnd[4], rnd[5], rnd[6], rnd[7]);
+    n = 64; GetUserNameW(user, &n); n = 64; GetComputerNameW(host, &n);
+    _snwprintf(name, 200, L"CN=wincan client (%ls@%ls)", user, host); name[199] = 0;
+    if ((ss = NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0)) != 0) FAIL("cannot open Windows' key storage");
+    if ((ss = NCryptCreatePersistedKey(prov, &key, BCRYPT_ECDSA_P256_ALGORITHM, container, 0, 0)) != 0) FAIL("cannot make the key");
+    { DWORD usage = NCRYPT_ALLOW_SIGNING_FLAG; NCryptSetProperty(key, NCRYPT_KEY_USAGE_PROPERTY, (PBYTE)&usage, sizeof usage, NCRYPT_PERSIST_FLAG); }
+    if ((ss = NCryptFinalizeKey(key, 0)) != 0) FAIL("cannot finish the key");
+    if (!CertStrToNameW(X509_ASN_ENCODING, name, CERT_X500_NAME_STR, NULL, NULL, &nsubj, NULL)) FAIL("cannot name the certificate");
+    subj = malloc(nsubj);
+    if (!subj || !CertStrToNameW(X509_ASN_ENCODING, name, CERT_X500_NAME_STR, NULL, subj, &nsubj, NULL)) FAIL("cannot name the certificate");
+    {   /* the usages: client authentication, and digital signature */
+        LPSTR oid = (LPSTR)szOID_PKIX_KP_CLIENT_AUTH; CERT_ENHKEY_USAGE e = { 1, &oid }; BYTE bits = CERT_DIGITAL_SIGNATURE_KEY_USAGE; CRYPT_BIT_BLOB kb = { 1, &bits, 7 };
+        if (!CryptEncodeObjectEx(X509_ASN_ENCODING, X509_ENHANCED_KEY_USAGE, &e, CRYPT_ENCODE_ALLOC_FLAG, NULL, &eku, &neku)) FAIL("cannot encode the usage");
+        if (!CryptEncodeObjectEx(X509_ASN_ENCODING, X509_KEY_USAGE, &kb, CRYPT_ENCODE_ALLOC_FLAG, NULL, &ku, &nku)) FAIL("cannot encode the usage");
+    }
+    {
+        CERT_EXTENSION ext[2]; CERT_EXTENSIONS exts = { 2, ext }; CERT_NAME_BLOB nb = { nsubj, subj };
+        CRYPT_KEY_PROV_INFO kpi; CRYPT_ALGORITHM_IDENTIFIER alg;
+        ext[0].pszObjId = (LPSTR)szOID_ENHANCED_KEY_USAGE; ext[0].fCritical = FALSE; ext[0].Value.cbData = neku; ext[0].Value.pbData = eku;
+        ext[1].pszObjId = (LPSTR)szOID_KEY_USAGE;          ext[1].fCritical = TRUE;  ext[1].Value.cbData = nku;  ext[1].Value.pbData = ku;
+        memset(&kpi, 0, sizeof kpi); kpi.pwszContainerName = container; kpi.pwszProvName = (LPWSTR)MS_KEY_STORAGE_PROVIDER;
+        memset(&alg, 0, sizeof alg); alg.pszObjId = (LPSTR)szOID_ECDSA_SHA256;
+        GetSystemTime(&t0); SystemTimeToFileTime(&t0, &ft); u.LowPart = ft.dwLowDateTime; u.HighPart = ft.dwHighDateTime;
+        u.QuadPart -= 3600ULL * 10000000ULL; ft.dwLowDateTime = u.LowPart; ft.dwHighDateTime = u.HighPart; FileTimeToSystemTime(&ft, &t0);      /* an hour back: clocks differ */
+        GetSystemTime(&t1); t1.wYear += 20; if (t1.wMonth == 2 && t1.wDay == 29) t1.wDay = 28;
+        cert = CertCreateSelfSignCertificate((HCRYPTPROV_OR_NCRYPT_KEY_HANDLE)key, &nb, 0, &kpi, &alg, &t0, &t1, &exts);
+        if (!cert) FAIL("cannot make the certificate");
+    }
+    if (!(st = CertOpenStore(CERT_STORE_PROV_SYSTEM_A, 0, 0, CERT_SYSTEM_STORE_CURRENT_USER, "MY"))) FAIL("cannot open your certificate store");
+    if (!CertAddCertificateContextToStore(st, cert, CERT_STORE_ADD_REPLACE_EXISTING, NULL)) FAIL("cannot put the certificate in your store");
+    n = sizeof hash;
+    if (!CertGetCertificateContextProperty(cert, CERT_HASH_PROP_ID, hash, &n)) FAIL("cannot read the thumbprint");
+    for (DWORD i = 0; i < 20; i++) snprintf(thumb + 2 * i, 3, "%02X", hash[i]);
+    if (!sha256(cert->pbCertEncoded, cert->cbCertEncoded, h256)) FAIL("cannot fingerprint the certificate");
+    fp_text(h256, fp);
+    ok = 1;
+out:
+    if (!ok && key) { NCryptDeleteKey(key, 0); key = 0; }        /* no half-made key left behind */
+    if (cert) CertFreeCertificateContext(cert);
+    if (st) CertCloseStore(st, 0);
+    if (key) NCryptFreeObject(key);
+    if (prov) NCryptFreeObject(prov);
+    if (subj) free(subj);
+    if (eku) LocalFree(eku);
+    if (ku) LocalFree(ku);
+    #undef FAIL
+    return ok;
+}
+
+/* put text on the clipboard */
+static void clip_set(const char *text)
+{
+    size_t n = strlen(text) + 1; HGLOBAL g;
+    if (!OpenClipboard(NULL)) return;
+    EmptyClipboard();
+    if ((g = GlobalAlloc(GMEM_MOVEABLE, n))) { memcpy(GlobalLock(g), text, n); GlobalUnlock(g); if (!SetClipboardData(CF_TEXT, g)) GlobalFree(g); }
+    CloseClipboard();
+}
+
+/* make the key, write the settings, say what to do next; 0 on a failure (already told) */
+static int make_key_and_tell(int quiet)
+{
+    char thumb[48] = "", fp[72] = "", err[200] = "", m[900], cmd[200];
+    if (!gen_client_key(thumb, fp, err, sizeof err)) {
+        snprintf(m, sizeof m, "wincan could not make its key: %s.", err);
+        if (quiet) say(m); else MessageBoxA(NULL, m, "wincan", MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
+        return 0;
+    }
+    snprintf(A.client_cert, sizeof A.client_cert, "%s", thumb);
+    WritePrivateProfileStringA("wincan", "client_cert", thumb, A.ini);
+    { char path[MAX_PATH + 32], dir[MAX_PATH]; snprintf(dir, sizeof dir, "%s", A.ini); char *sl = strrchr(dir, '\\'); if (sl) *sl = 0;
+      snprintf(path, sizeof path, "%s\\client-fingerprint.txt", dir); FILE *f = fopen(path, "w"); if (f) { fprintf(f, "%s\n", fp); fclose(f); } }
+    snprintf(cmd, sizeof cmd, "candled --authorize %s", fp);
+    clip_set(cmd);
+    snprintf(m, sizeof m, "wincan's key is ready.\n\nIts fingerprint:\n%s\n\nThe server's administrator has to let it in.  The command is on the clipboard:\n%s", fp, cmd);
+    if (quiet) { snprintf(m, sizeof m, "%s\n", fp); say(m); }
+    else MessageBoxA(NULL, m, "wincan", MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
+    return 1;
+}
+
+/* a small box that asks for one line of text (the server, at the first start) */
+static char g_ask_buf[256]; static int g_ask_done; static HWND g_ask_edit;
+static LRESULT CALLBACK ask_proc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    switch (m) {
+    case WM_COMMAND:
+        if (LOWORD(w) == IDOK) { GetWindowTextA(g_ask_edit, g_ask_buf, sizeof g_ask_buf); g_ask_done = 1; DestroyWindow(h); return 0; }
+        if (LOWORD(w) == IDCANCEL) { g_ask_buf[0] = 0; g_ask_done = 2; DestroyWindow(h); return 0; }
+        break;
+    case WM_CLOSE: g_ask_buf[0] = 0; g_ask_done = 2; DestroyWindow(h); return 0;
+    }
+    return DefWindowProc(h, m, w, l);
+}
+static int ask_text(const char *title, const char *prompt, const char *dflt, char *out, size_t cap)
+{
+    WNDCLASSA wc; HWND h, st, ok, no; HFONT f = (HFONT)GetStockObject(DEFAULT_GUI_FONT); MSG msg;
+    int W = 460, H = 190, x = (GetSystemMetrics(SM_CXSCREEN) - W) / 2, y = (GetSystemMetrics(SM_CYSCREEN) - H) / 3;
+    memset(&wc, 0, sizeof wc); wc.lpfnWndProc = ask_proc; wc.hInstance = GetModuleHandle(NULL); wc.lpszClassName = "wincan-ask"; wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    RegisterClassA(&wc);
+    g_ask_done = 0;
+    h = CreateWindowExA(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME, "wincan-ask", title, WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, W, H, NULL, NULL, wc.hInstance, NULL);
+    st = CreateWindowExA(0, "STATIC", prompt, WS_CHILD | WS_VISIBLE, 16, 14, W - 48, 70, h, NULL, wc.hInstance, NULL);
+    g_ask_edit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", dflt, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 16, 90, W - 48, 24, h, NULL, wc.hInstance, NULL);
+    ok = CreateWindowExA(0, "BUTTON", "OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, W - 206, 126, 80, 26, h, (HMENU)IDOK, wc.hInstance, NULL);
+    no = CreateWindowExA(0, "BUTTON", "Not now", WS_CHILD | WS_VISIBLE | WS_TABSTOP, W - 112, 126, 80, 26, h, (HMENU)IDCANCEL, wc.hInstance, NULL);
+    SendMessage(st, WM_SETFONT, (WPARAM)f, TRUE); SendMessage(g_ask_edit, WM_SETFONT, (WPARAM)f, TRUE); SendMessage(ok, WM_SETFONT, (WPARAM)f, TRUE); SendMessage(no, WM_SETFONT, (WPARAM)f, TRUE);
+    ShowWindow(h, SW_SHOW); SetForegroundWindow(h); SetFocus(g_ask_edit); SendMessage(g_ask_edit, EM_SETSEL, 0, -1);
+    while (!g_ask_done && GetMessage(&msg, NULL, 0, 0) > 0) { if (!IsDialogMessage(h, &msg)) { TranslateMessage(&msg); DispatchMessage(&msg); } }
+    if (g_ask_done == 1 && g_ask_buf[0]) { snprintf(out, cap, "%.*s", (int)cap - 1, g_ask_buf); return 1; }
+    return 0;
+}
+
+/* the first start with an https:// server and no key: offer to make one (once and for all: "no" is remembered) */
+static void offer_key(void)
+{
+    char m[700];
+    snprintf(m, sizeof m, "wincan connects to %s over an encrypted connection and proves who it is with a key of its own.  This computer does not have one yet.\n\n"
+             "Make it now?  It is kept by Windows, in your own certificate store, and cannot be copied out.", A.host);
+    if (MessageBoxA(NULL, m, "wincan: a key for this computer", MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND) == IDYES) {
+        if (make_key_and_tell(0)) load_client_cert();
+    } else {
+        A.key_prompt = 0; WritePrivateProfileStringA("wincan", "key_prompt", "0", A.ini);
+        MessageBoxA(NULL, "Without a key the server will refuse wincan.  Start wincan with --gen-key whenever you want one.", "wincan", MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
+    }
+}
+
 /* ---------------------------------------------------------------- the network (a worker thread) */
 
 static void resolve(void)
@@ -310,6 +459,7 @@ static char *http_get(const char *path)
         if (!g_conn) { http_close(); return NULL; }
     }
     char *out = NULL; int ok = 0;
+    if (!A.tls && !is_loopback_host(A.host)) { snprintf(A.err, sizeof A.err, "plain HTTP is for this computer only: use https://"); return NULL; }
     HINTERNET r = WinHttpOpenRequest(g_conn, L"GET", wpath, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, A.tls ? WINHTTP_FLAG_SECURE : 0);
     int sent = 0;
     if (r && A.tls) {
@@ -1518,7 +1668,10 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     A.cache = calloc(40, sizeof *A.cache);
     ini_path();
     char buf[128];
-    GetPrivateProfileStringA("wincan", "server", "localhost:8766", buf, sizeof buf, A.ini); parse_server(buf);
+    GetPrivateProfileStringA("wincan", "server", "", buf, sizeof buf, A.ini);
+    A.first_run = buf[0] == 0;                       /* no settings yet: the first start */
+    parse_server(buf[0] ? buf : "localhost:8766");
+    A.key_prompt = GetPrivateProfileIntA("wincan", "key_prompt", 1, A.ini);
     GetPrivateProfileStringA("wincan", "pair", "BTC", A.pair, sizeof A.pair, A.ini);
     char tfs[8]; GetPrivateProfileStringA("wincan", "tf", "5m", tfs, sizeof tfs, A.ini);
     A.tf = 2; for (int i = 0; i < NTF; i++) if (!strcmp(tfs, TFS[i])) A.tf = i;
@@ -1531,7 +1684,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     A.field_last = GetPrivateProfileIntA("wincan", "editfield", 0, A.ini); A.ind[0] = GetPrivateProfileIntA("wincan", "bollinger", 1, A.ini); A.ind[1] = GetPrivateProfileIntA("wincan", "ma9", 1, A.ini); A.ind[2] = GetPrivateProfileIntA("wincan", "ma200", 1, A.ini); A.ind[3] = GetPrivateProfileIntA("wincan", "volcandles", 0, A.ini); A.hover = -1;
     A.scale = GetPrivateProfileIntA("wincan", "scale", 100, A.ini); if (A.scale < 75 || A.scale > 400) A.scale = 100;
     A.fscale = GetPrivateProfileIntA("wincan", "fullscale", 200, A.ini); if (A.fscale < 75 || A.fscale > 400) A.fscale = 200;
-    int server_given = 0, want_fp = 0, argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    int server_given = 0, want_fp = 0, want_key = 0, argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; i++) {
         char a[256]; WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, a, sizeof a, NULL, NULL);
         char nx[256] = ""; if (i + 1 < argc) WideCharToMultiByte(CP_UTF8, 0, argv[i + 1], -1, nx, sizeof nx, NULL, NULL);
@@ -1563,21 +1716,34 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
                 "  --pair NAME, --tf FRAME       start with this coin and timeframe (1m 3m 5m 15m 30m 1h 4h 1d 1w)\n"
                 "  --scale PERCENT               the size of the window, 75 to 400\n"
                 "  --fingerprint                 print the SHA-256 fingerprint of this computer's key, for candled --authorize\n"
+                "  --gen-key                     make this computer's key, if there is none, and print its fingerprint\n"
                 "  -h, --help                    display this help and exit\n"
                 "      --version                 output version information and exit\n\n"
                 "Keys, clicks and the settings file: wincan(1) and wincan(5).\n"
                 "Report bugs at https://github.com/moebiusV/wincan/issues\n");
             return 0; }
         else if (!strcmp(a, "--fingerprint")) want_fp = 1;
+        else if (!strcmp(a, "--gen-key")) want_key = 1;
     }
     { char sv[200]; snprintf(sv, sizeof sv, "%s:%d", A.host, A.port); if (strcmp(A.pin_for, sv)) A.pin[0] = 0; }      /* a pin is for the server it was made for */
-    if (A.tls || want_fp) load_client_cert();
+    if (A.first_run && !server_given && !A.shot && !A.test_close && !want_fp && !want_key) {      /* the first start: ask where the candles come from */
+        char sv[200];
+        if (ask_text("wincan: where do the candles come from?", "The address of the candle server, as the person who runs it gave it to you:\n\n    https://HOST:8766", "https://", sv, sizeof sv)) {
+            parse_server(sv); server_given = 1; A.ip[0] = 0;
+        }
+    }
+    if (A.tls || want_fp || want_key) load_client_cert();
+    if (want_key) {
+        if (g_client_fp[0]) { char m[200]; snprintf(m, sizeof m, "This computer already has a key:\n%s\n", g_client_fp); say(m); return 0; }
+        return make_key_and_tell(1) ? 0 : 1;
+    }
     if (want_fp) {
         if (g_client_fp[0]) { char m[200]; snprintf(m, sizeof m, "%s\n", g_client_fp); say(m); return 0; }
         say("wincan: no client key found (client_cert in wincan.ini names its thumbprint; the installer makes the key)\n");
         return 1;
     }
-    if (server_given && !A.shot) save_all();                       /* the server given on the command line is kept */
+    if (server_given && !A.shot) save_all();
+    if (A.tls && !g_client_cert && A.key_prompt && !A.shot && !A.test_close) offer_key();                       /* the server given on the command line is kept */
     if (!A.shot && !A.test_close) {                              /* one copy only: another that finds this one says so (it shows the window) and leaves */
         HANDLE once = CreateMutexA(NULL, TRUE, "Local\\wincan-single-instance");
         if (once && GetLastError() == ERROR_ALREADY_EXISTS) {
