@@ -55,3 +55,4 @@
             usage, the thumbprint in wincan.ini, the fingerprint in client-fingerprint.txt and its authorize command on the clipboard); the first-start box for the server;
             plain HTTP only to a loopback host; key_prompt in wincan.ini.  Release 1.1.0.
 2026-11-25  man/candled-data.5: the formats of the candle files and the minute records; contrib/candle-writer.py; tests/test_formats.sh.
+2026-11-25  Release 1.1.1: documentation, an example writer and a test; no change in behaviour.

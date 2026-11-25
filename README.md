@@ -69,7 +69,7 @@ wincan only needs *a candle supply*. `candled` is one; anything that speaks the 
 
 ### Windows: the window
 
-Download `wincan-1.1.0-win64.zip` from the [latest release](https://github.com/moebiusV/wincan/releases/latest), unpack it, open PowerShell in the unpacked folder, and run:
+Download `wincan-1.1.1-win64.zip` from the [latest release](https://github.com/moebiusV/wincan/releases/latest), unpack it, open PowerShell in the unpacked folder, and run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File install.ps1 -Server https://HOST:8766 -ServerPin SHA256:... -Launch
@@ -87,7 +87,7 @@ No administrator rights are needed. It puts `wincan.exe` in `%LOCALAPPDATA%\Prog
 ### Linux (Debian, Ubuntu, Fedora, Alpine, WSL2): the candle supply
 
 ```sh
-tar xf wincan-1.1.0.tar.gz && cd wincan-1.1.0
+tar xf wincan-1.1.1.tar.gz && cd wincan-1.1.1
 sudo sh linux/install-candled.sh          # builds, installs, makes the service user and the server key, starts the service
 ```
 

@@ -1,4 +1,4 @@
-wincan after 1.1.0:
+wincan 1.1.1 (2026-11-25)
   candled-data(5) documents the on-disk formats candled reads (the 30-byte frames of the candle files and the 80-byte minute records), contrib/candle-writer.py
   writes them as an example, and tests/test_formats.sh reads them back through candled.
 

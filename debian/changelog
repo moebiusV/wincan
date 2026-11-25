@@ -1,3 +1,10 @@
+wincan (1.1.1-1) unstable; urgency=medium
+
+  * candled-data(5) documents the on-disk formats candled reads; an example
+    writer and a test.  No change in behaviour.
+
+ -- David Walther <david@clearbrookdistillery.com>  Wed, 25 Nov 2026 02:25:07 -0800
+
 wincan (1.1.0-1) unstable; urgency=medium
 
   * wincan makes its own key (and asks for the server) at the first start;
