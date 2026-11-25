@@ -64,7 +64,7 @@ on Debian, Ubuntu (WSL2 too), Fedora and relatives, and Alpine.
 Releasing
 ---------
   1. Update NEWS, ChangeLog, debian/changelog and the version in configure.ac; commit.
-  2. make distcheck           the tarballs (.tar.gz, .tar.xz) are made, unpacked, built, tested, installed and uninstalled.
+  2. make distcheck           the tarball (.tar.gz, only) is made, unpacked, built, tested, installed and uninstalled.
   3. dpkg-buildpackage -us -uc -b, in an unpacked tarball: candled_*.deb and wincan-windows_*.deb; run lintian on them.
   4. The Windows zip: wincan.exe, install.ps1, uninstall.ps1, install.cmd, README.txt, SHA256SUMS (of those four files:
      install.ps1 checks wincan.exe against it), COPYING and a SOURCE.txt that says where the source is.

@@ -7,7 +7,7 @@ AC_CONFIG_SRCDIR([src/candled.c])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIRS([m4])
 AC_CONFIG_HEADERS([config.h])
-AM_INIT_AUTOMAKE([1.13 gnu -Wall -Wno-portability subdir-objects dist-xz tar-pax])
+AM_INIT_AUTOMAKE([1.13 gnu -Wall -Wno-portability subdir-objects tar-pax])
 AM_SILENT_RULES([yes])
 
 AC_USE_SYSTEM_EXTENSIONS
