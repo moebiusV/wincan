@@ -5,3 +5,4 @@ test_heat
 test_go
 Makefile
 *.tar.gz
+test_conf

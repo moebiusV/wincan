@@ -3,6 +3,8 @@ PACKAGE   = wincan
 VERSION   = @VERSION@
 prefix    = @prefix@
 bindir    = $(prefix)/bin
+sysconfdir = /etc
+localstatedir = /var
 sbindir   = $(prefix)/sbin
 mandir    = $(prefix)/share/man
 CC        = @CC@
@@ -11,7 +13,9 @@ HASWIN    = @HASWIN@
 CFLAGS   ?= -O2
 WARN      = -std=gnu11 -Wall -Wextra -DPACKAGE_VERSION='"$(VERSION)"'
 DISTFILES = AUTHORS COPYING ChangeLog INSTALL NEWS README VERSION configure Makefile.in \
-            src/agg.c src/agg.h src/heat.c src/heat.h src/gomatch.h src/candled.c src/wincan.c tests/test_agg.c tests/test_heat.c tests/test_go.c \
+            src/agg.c src/agg.h src/heat.c src/heat.h src/gomatch.h src/candled.c src/wincan.c src/tls.c src/tls.h \
+            src/candled_conf.c src/candled_conf.h src/hbnf_conf.c src/hbnf_conf.h grammars/candled.hbnf tools/regen-conf.sh \
+            tests/test_agg.c tests/test_heat.c tests/test_go.c tests/test_conf.c tests/test_tls.sh tests/no-private.sh tests/conf \
             man/candled.8 man/wincan.1 man/wincan.5 contrib/candled.service
 
 TARGETS = candled
@@ -21,8 +25,9 @@ endif
 
 all: $(TARGETS)
 
-candled: src/candled.c src/agg.c src/agg.h src/heat.c src/heat.h
-	$(CC) $(CFLAGS) $(WARN) -o $@ src/candled.c src/agg.c src/heat.c -lsqlite3 -lcurl -lpthread -lm
+candled: src/candled.c src/agg.c src/agg.h src/heat.c src/heat.h src/tls.c src/tls.h src/candled_conf.c src/candled_conf.h src/hbnf_conf.c src/hbnf_conf.h
+	$(CC) $(CFLAGS) $(WARN) -Wno-missing-field-initializers -DSYSCONFDIR='"$(sysconfdir)"' -DSTATEDIR='"$(localstatedir)/lib/candled"' -Isrc \
+	    -o $@ src/candled.c src/agg.c src/heat.c src/tls.c src/candled_conf.c src/hbnf_conf.c -lsqlite3 -lcurl -lssl -lcrypto -lpthread -lm
 
 wincan.exe: src/wincan.c src/gomatch.h
 	$(WINCC) $(CFLAGS) $(WARN) -mwindows -o $@ src/wincan.c -lgdi32 -lwinhttp -lshell32 -luser32 -lws2_32
@@ -38,10 +43,16 @@ test_heat: tests/test_heat.c src/heat.c src/heat.h
 test_go: tests/test_go.c src/gomatch.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ tests/test_go.c
 
-check: test_agg test_heat test_go
+test_conf: tests/test_conf.c src/candled_conf.c src/candled_conf.h src/hbnf_conf.c src/hbnf_conf.h
+	$(CC) $(CFLAGS) $(WARN) -Wno-missing-field-initializers -Isrc -o $@ tests/test_conf.c src/candled_conf.c src/hbnf_conf.c
+
+check: candled test_agg test_heat test_go test_conf
 	./test_agg
 	./test_heat
 	./test_go
+	srcdir=. ./test_conf
+	CANDLED=./candled sh tests/test_tls.sh
+	sh tests/no-private.sh
 
 install: all
 	install -d $(DESTDIR)$(sbindir) $(DESTDIR)$(bindir) $(DESTDIR)$(mandir)/man8 $(DESTDIR)$(mandir)/man1 $(DESTDIR)$(mandir)/man5
@@ -69,7 +80,7 @@ dist: $(DISTFILES)
 	rm -rf $(PACKAGE)-$(VERSION)
 
 clean:
-	rm -f candled wincan.exe test_agg test_heat test_go
+	rm -f candled wincan.exe test_agg test_heat test_go test_conf
 
 distclean: clean
 	rm -f Makefile $(PACKAGE)-*.tar.gz

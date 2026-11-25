@@ -1,0 +1,184 @@
+; candled.conf -- the configuration file of candled(8), as an hbnf grammar over obconf.
+;
+; This is the source of src/candled_conf.c, which was generated from it by the hbnf parser
+; generator meta compiler (https://github.com/moebiusV/hbnf).  The package does not need hbnf to be
+; built: the generated file is committed.  To regenerate it see HACKING; in short, with this file
+; the grammar is self-contained, it includes no other file:
+;
+;     hbnf grammars/candled.hbnf --backend=c > candled_conf.c
+;
+; and the runtime it links, hbnf's runtime/hbnf_conf.c and hbnf_conf.h, are in src/.
+;
+; The notation is obconf's: a directive is a keyword and its arguments, ended by the end of the
+; line; strings are in double quotes; `#` starts a comment.  Every directive may be given once, except
+; `authorize`, which may be repeated.  The meaning is in candled.conf(5).
+
+language C
+prefix none
+statements
+keywords {
+    listen port tls insecure official-klines certificate key authorized authorize
+    candles backfill database live-bins heat-db yes no
+}
+; phrase rules skip `ws` between their elements; character rules never do (defined below)
+whitespace ws
+{
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "candled_conf.h"
+#include "hbnf_conf.h"
+
+/* the configuration being filled in (candled_conf_parse sets it) */
+static struct candled_conf *conf;
+
+static void set_str(char **dst, const char *v) {
+    free(*dst);
+    *dst = strdup(v);
+    if (*dst == NULL) { perror("candled"); exit(1); }
+}
+}
+
+; -- candled.conf ---------------------------------------------------------------------------
+
+config = | config entry
+
+entry  = "listen" address
+       | "port" int
+       | "tls" yesno
+       | "insecure" yesno
+       | "official-klines" yesno
+       | "certificate" string
+       | "key" string
+       | "authorized" string
+       | "authorize" string
+       | "candles" string
+       | "backfill" string
+       | "database" string
+       | "live-bins" string
+       | "heat-db" string
+
+; the checks and the effect of each directive, in the order of the file; an error drops the directive
+action entry {
+    switch (n->kind) {
+    case ENTRY_LISTEN:
+        if (n->address == NULL || n->address[0] == '\0') { bind_error("listen needs an address"); return; }
+        set_str(&conf->listen_addr, n->address);
+        break;
+    case ENTRY_PORT:
+        if (n->hyper_int < 1 || n->hyper_int > 65535) { bind_error("the port must be between 1 and 65535"); return; }
+        conf->port = (int)n->hyper_int;
+        break;
+    case ENTRY_TLS:      conf->tls = n->yesno == YESNO_YES; break;
+    case ENTRY_INSECURE: conf->insecure = n->yesno == YESNO_YES; break;
+    case ENTRY_OFFICIAL_KLINES: conf->official_klines = n->yesno == YESNO_YES; break;
+    case ENTRY_CERTIFICATE: set_str(&conf->certificate, n->string); break;
+    case ENTRY_KEY:         set_str(&conf->key, n->string); break;
+    case ENTRY_AUTHORIZED:  set_str(&conf->authorized, n->string); break;
+    case ENTRY_AUTHORIZE: {
+        char **p;
+        if (strncmp(n->string, "SHA256:", 7) != 0 || strlen(n->string) != 7 + 64 ||
+            strspn(n->string + 7, "0123456789abcdefABCDEF") != 64) {
+            bind_error("authorize wants SHA256: and 64 hexadecimal digits");
+            return;
+        }
+        p = realloc(conf->authorize, (conf->nauthorize + 1) * sizeof *p);
+        if (p == NULL) { perror("candled"); exit(1); }
+        conf->authorize = p;
+        conf->authorize[conf->nauthorize] = strdup(n->string);
+        if (conf->authorize[conf->nauthorize] == NULL) { perror("candled"); exit(1); }
+        conf->nauthorize++;
+        break;
+    }
+    case ENTRY_CANDLES:   set_str(&conf->candles, n->string); break;
+    case ENTRY_BACKFILL:  set_str(&conf->backfill, n->string); break;
+    case ENTRY_DATABASE:  set_str(&conf->database, n->string); break;
+    case ENTRY_LIVE_BINS: set_str(&conf->live_bins, n->string); break;
+    case ENTRY_HEAT_DB:   set_str(&conf->heat_db, n->string); break;
+    default: break;
+    }
+}
+
+; -- the obconf core -----------------------------------------------------------------------
+; The lexical rules of obconf, hbnf's configuration language for OpenBSD-style files (keyword
+; arguments, double-quoted strings, `#` comments, no interpolation), taken from hbnf's
+; grammars/obconf.hbnf and common.hbnf (ISC licence, Copyright (c) 2026 David Walther) and
+; written out here so that this file stands alone: it includes nothing.
+
+; the character classes used (RFC 5234 appendix B.1 and the named ASCII characters)
+DIGIT  = 0x30..0x39
+ALPHA  = 0x41..0x5A | 0x61..0x7A
+SP     = 0x20
+HTAB   = 0x09
+LF     = 0x0A
+CR     = 0x0D
+DQUOTE = 0x22
+
+; a bareword may hold what a file name, an IPv4 address or a host name holds
+wordchars  = ALPHA | DIGIT | "_" | "-" | "." | "/" | ":"
+word_start = ALPHA | "_" | "-" | "/"
+word_non_digit = word_start | "."
+
+; `int` is declared before `word`, so that a bare number is an `int` (the scanner keeps the
+; longest match, first declared on a tie)
+int  = 1*DIGIT | "-" 1*DIGIT
+word = word_start *wordchars | 1*DIGIT word_non_digit *wordchars
+
+; a quoted string, with backslash escapes
+str      = DQUOTE *str_char DQUOTE
+str_char = 0x5C 0x00..0x10FFFF | 0x00..0x21 | 0x23..0x5B | 0x5D..0x10FFFF
+
+; `#` to the end of the line; a backslash at the end of a line continues it
+comment      = "#" *comment_char
+comment_char = 0x01..0x09 | 0x0B..0x10FFFF
+continuation = 0x5C LF
+
+; what is skipped between the elements of a phrase: blanks, newlines, comments, continuations
+ws = SP | HTAB | CR | LF | comment | continuation
+
+string   = str | word
+yesno    = "yes" | "no"
+wildcard = "*"
+address  = wildcard | str | word
+
+{
+#define HBNF_CONF_RUN
+#include "hbnf_conf.h"
+
+static int hbnf_parse_config(const char *path) {
+    return hbnf_conf_run(path);
+}
+
+void candled_conf_init(struct candled_conf *c) {
+    memset(c, 0, sizeof *c);
+    c->tls = c->insecure = c->official_klines = -1;
+}
+
+void candled_conf_free(struct candled_conf *c) {
+    size_t i;
+    free(c->listen_addr); free(c->certificate); free(c->key); free(c->authorized);
+    free(c->candles); free(c->backfill); free(c->database); free(c->live_bins); free(c->heat_db);
+    for (i = 0; i < c->nauthorize; i++) free(c->authorize[i]);
+    free(c->authorize);
+    candled_conf_init(c);
+}
+
+/* hbnf's runtime stops the process at a syntax error unless the program takes the messages itself
+   (hbnf_conf.h): candled reports every error as "file:line: message" and returns -1. */
+static void candled_conf_error(size_t line, const char *msg) {
+    size_t l, col, off;
+    int n = 0;
+    if (sscanf(msg, "%zu:%zu:%zu: %n", &l, &col, &off, &n) >= 3 && n > 0)
+        fprintf(stderr, "%s:%s\n", conf_file ? conf_file : "candled.conf", msg);
+    else if (line)
+        fprintf(stderr, "%s:%zu: %s\n", conf_file ? conf_file : "candled.conf", line, msg);
+    else
+        fprintf(stderr, "%s: %s\n", conf_file ? conf_file : "candled.conf", msg);
+}
+
+int candled_conf_parse(const char *path, struct candled_conf *c) {
+    conf = c;
+    conf_error = candled_conf_error;
+    return hbnf_parse_config(path) == -1 ? -1 : 0;
+}
+}

@@ -26,7 +26,12 @@
 #include <arpa/inet.h>
 #include <sqlite3.h>
 #include <curl/curl.h>
+#include <stdarg.h>
+#include <syslog.h>
+#include <getopt.h>
 #include "heat.h"
+#include "candled_conf.h"
+#include "tls.h"
 
 #define MAX_PAIRS 512
 static const char *heatdb = NULL;      /* the liquidation-map database: order-book bands, open interest and long/short ratios, for /heat (candled(8) has its schema) */
@@ -350,12 +355,25 @@ static const char *qparam(const char *q, const char *key, char *out, size_t cap)
     return NULL;
 }
 
+/* the connection of this thread: TLS (the client has been let in by its key), or plain on a loopback address */
+static __thread SSL *conn_ssl;
+static ssize_t conn_read(int fd, void *b, size_t n)
+{
+    if (conn_ssl) { int r = SSL_read(conn_ssl, b, (int)n); return r > 0 ? r : -1; }
+    return read(fd, b, n);
+}
+static ssize_t conn_write(int fd, const void *b, size_t n)
+{
+    if (conn_ssl) { int r = SSL_write(conn_ssl, b, (int)n); return r > 0 ? r : -1; }
+    return write(fd, b, n);
+}
+
 static void respond(int fd, int code, const char *status, const char *body, int len)
 {
     char head[256];
     int h = snprintf(head, sizeof head, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nCache-Control: no-store\r\nConnection: keep-alive\r\nKeep-Alive: timeout=60\r\n\r\n", code, status, len);
-    if (write(fd, head, (size_t)h) < 0) return;
-    for (int off = 0; off < len; ) { ssize_t w = write(fd, body + off, (size_t)(len - off)); if (w <= 0) return; off += (int)w; }
+    if (conn_write(fd, head, (size_t)h) < 0) return;
+    for (int off = 0; off < len; ) { ssize_t w = conn_write(fd, body + off, (size_t)(len - off)); if (w <= 0) return; off += (int)w; }
 }
 
 /* GET /heat?pair=ZEC: the modelled liquidation ladder, one bucket per percentage point (0-1 .. 19-20 per cent from the price), longs below, shorts above.
@@ -442,7 +460,7 @@ static int handle(int fd, char *body, size_t bodycap, Out *out)
 {
     char req[2048]; ssize_t got = 0;
     while (got < (ssize_t)sizeof req - 1) {
-        ssize_t r = read(fd, req + got, sizeof req - 1 - (size_t)got);
+        ssize_t r = conn_read(fd, req + got, sizeof req - 1 - (size_t)got);
         if (r <= 0) return 0;                                        /* closed, or idle for too long */
         got += r; req[got] = 0;
         if (strstr(req, "\r\n\r\n") || strstr(req, "\n\n")) break;
@@ -512,53 +530,227 @@ static int handle(int fd, char *body, size_t bodycap, Out *out)
 
 static volatile int nconn;
 static pthread_mutex_t nconn_mu = PTHREAD_MUTEX_INITIALIZER;
+static int use_tls, daemonized;
+
+/* a line of the log: on standard error, or in the system log once the program is a daemon */
+static void logmsg(const char *fmt, ...)
+{
+    char b[512]; va_list ap;
+    va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
+    if (daemonized) syslog(LOG_INFO, "%s", b); else fprintf(stderr, "candled: %s\n", b);
+}
 
 /* a connection stays open for as many requests as the client sends, until it closes or is idle for a minute */
 static void *serve(void *arg)
 {
     int fd = (int)(intptr_t)arg;
-    struct timeval tv = { 60, 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    struct timeval tv = { 60, 0 }, hs = { 10, 0 };
     int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    conn_ssl = NULL;
+    if (use_tls) {                                       /* the handshake, then the client's key must be one that is let in */
+        char fp[TLS_FP_LEN]; const char *why = "";
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &hs, sizeof hs); setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &hs, sizeof hs);
+        conn_ssl = tls_accept(fd, fp, &why);
+        if (!conn_ssl) { logmsg("refused a connection: %s", why); goto done; }
+        if (!tls_authz_check(fp)) {
+            logmsg("refused a client whose key is not authorized: %s  (to let it in: candled --authorize %s)", fp, fp);
+            goto done;
+        }
+    }
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv); setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     char *body = malloc(64 * 1024); Out *out = malloc(sizeof *out);
     if (body && out) while (handle(fd, body, 64 * 1024, out)) ;
-    free(body); free(out); close(fd);
+    free(body); free(out);
+done:
+    if (conn_ssl) { SSL_shutdown(conn_ssl); SSL_free(conn_ssl); conn_ssl = NULL; }
+    close(fd);
     pthread_mutex_lock(&nconn_mu); nconn--; pthread_mutex_unlock(&nconn_mu);
     return NULL;
 }
 
+#ifndef SYSCONFDIR
+#define SYSCONFDIR "/etc"
+#endif
+#ifndef STATEDIR
+#define STATEDIR "/var/lib/candled"
+#endif
+#ifndef PACKAGE_URL
+#define PACKAGE_URL "https://github.com/moebiusV/wincan"
+#endif
+
+static const char *pidfile_path;
+static void on_term(int sig) { (void)sig; if (pidfile_path) unlink(pidfile_path); _exit(0); }
+
+static void usage(FILE *f)
+{
+    fputs(
+"Usage: candled [OPTION]...\n"
+"Serve candles, as JSON, from a collector's files, to wincan and other clients.\n"
+"\n"
+"The settings come from the configuration file (candled.conf(5)); an option overrides it.\n"
+"  -c, --config=FILE        the configuration file (default " SYSCONFDIR "/candled.conf, if there is one)\n"
+"  -t, --check-config       read the configuration, say whether it is good, and exit\n"
+"      --dir=DIR            the directory of the collector's .bin files\n"
+"      --backfill=DIR       a second directory of .bin files, for the time before --dir has data\n"
+"      --db=FILE            a SQLite database of one-minute candles\n"
+"      --live-bins=DIR      a websocket daemon's directory of one-minute candles\n"
+"      --heat-db=FILE       the liquidation-map database for /heat\n"
+"      --official-klines    fetch the exchange's own candles and the mark price\n"
+"      --bind=ADDRESS       the IPv4 address to listen on (default 127.0.0.1)\n"
+"      --port=N             the TCP port (default 8766)\n"
+"      --no-tls             plain HTTP (only on a loopback address, unless --insecure)\n"
+"      --insecure           allow plain HTTP on any address\n"
+"      --certificate=FILE   the server's certificate (PEM)\n"
+"      --key=FILE           the server's private key (PEM)\n"
+"      --authorized=FILE    the file of the fingerprints of the clients that are let in\n"
+"  -D, --daemon             run in the background, logging to the system log\n"
+"  -P, --pidfile=FILE       write the process id to FILE\n"
+"\n"
+"Keys (see candled(8)):\n"
+"      --gen-cert           make the server's key and certificate, and print the fingerprint\n"
+"      --force              with --gen-cert, replace existing files\n"
+"      --fingerprint        print the fingerprint of the server's certificate\n"
+"      --authorize=FINGERPRINT   let in the client whose certificate has this SHA-256 fingerprint\n"
+"      --comment=TEXT       with --authorize, a note for the file\n"
+"\n"
+"  -h, --help               display this help and exit\n"
+"  -V, --version            output version information and exit\n"
+"\n"
+"Report bugs at " PACKAGE_URL "/issues\n", f);
+}
+
+static void version(void)
+{
+    puts("candled (wincan) " PACKAGE_VERSION "\n"
+         "Copyright (C) 2026 David Walther\n"
+         "License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\n"
+         "This is free software: you are free to change and redistribute it.\n"
+         "There is NO WARRANTY, to the extent permitted by law.");
+}
+
+static int is_loopback(const char *a) { return !strncmp(a, "127.", 4); }
+static char *joined(const char *dir_, const char *name) { size_t n = strlen(dir_) + strlen(name) + 2; char *r = malloc(n); if (r) snprintf(r, n, "%s/%s", dir_, name); return r; }
+
 int main(int argc, char **argv)
 {
-    int port = 8766; const char *bind_addr = "0.0.0.0";
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--dir") && i + 1 < argc) dir = argv[++i];
-        else if (!strcmp(argv[i], "--backfill") && i + 1 < argc) dir2 = argv[++i];
-        else if (!strcmp(argv[i], "--db") && i + 1 < argc) dbpath = argv[++i];
-        else if (!strcmp(argv[i], "--live-bins") && i + 1 < argc) binsdir = argv[++i];
-        else if (!strcmp(argv[i], "--heat-db") && i + 1 < argc) heatdb = argv[++i];
-        else if (!strcmp(argv[i], "--official-klines")) rest_enabled = 1;
-        else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--bind") && i + 1 < argc) bind_addr = argv[++i];
-        else if (!strcmp(argv[i], "--version")) { puts("candled " PACKAGE_VERSION); return 0; }
-        else { fprintf(stderr, "usage: candled --dir DIR [--db FILE] [--live-bins DIR] [--heat-db FILE] [--official-klines] [--backfill DIR] [--port N] [--bind ADDR]\n"); return 2; }
+    enum { O_DIR = 256, O_BACKFILL, O_DB, O_LIVE, O_HEAT, O_OFFICIAL, O_BIND, O_PORT, O_NOTLS, O_INSECURE, O_CERT, O_KEY, O_AUTHORIZED,
+           O_GENCERT, O_FORCE, O_FPR, O_AUTHORIZE, O_COMMENT };
+    static const struct option longopts[] = {
+        { "config", 1, 0, 'c' }, { "check-config", 0, 0, 't' }, { "daemon", 0, 0, 'D' }, { "pidfile", 1, 0, 'P' },
+        { "help", 0, 0, 'h' }, { "version", 0, 0, 'V' },
+        { "dir", 1, 0, O_DIR }, { "backfill", 1, 0, O_BACKFILL }, { "db", 1, 0, O_DB }, { "live-bins", 1, 0, O_LIVE }, { "heat-db", 1, 0, O_HEAT },
+        { "official-klines", 0, 0, O_OFFICIAL }, { "bind", 1, 0, O_BIND }, { "port", 1, 0, O_PORT },
+        { "no-tls", 0, 0, O_NOTLS }, { "insecure", 0, 0, O_INSECURE }, { "certificate", 1, 0, O_CERT }, { "key", 1, 0, O_KEY }, { "authorized", 1, 0, O_AUTHORIZED },
+        { "gen-cert", 0, 0, O_GENCERT }, { "force", 0, 0, O_FORCE }, { "fingerprint", 0, 0, O_FPR }, { "authorize", 1, 0, O_AUTHORIZE }, { "comment", 1, 0, O_COMMENT },
+        { 0, 0, 0, 0 } };
+    const char *cfgpath = NULL, *c_dir = NULL, *c_back = NULL, *c_db = NULL, *c_live = NULL, *c_heat = NULL, *c_bind = NULL, *c_cert = NULL, *c_key = NULL, *c_authz = NULL;
+    const char *c_authorize = NULL, *c_comment = NULL, *c_pid = NULL;
+    int c_official = -1, c_port = 0, c_tls = -1, c_insecure = -1, check = 0, gencert = 0, force = 0, fpr = 0, daemon_mode = 0, opt;
+    struct candled_conf cf; candled_conf_init(&cf);
+
+    while ((opt = getopt_long(argc, argv, "c:tDP:hV", longopts, NULL)) != -1) {
+        switch (opt) {
+        case 'c': cfgpath = optarg; break;           case 't': check = 1; break;
+        case 'D': daemon_mode = 1; break;            case 'P': c_pid = optarg; break;
+        case 'h': usage(stdout); return 0;           case 'V': version(); return 0;
+        case O_DIR: c_dir = optarg; break;           case O_BACKFILL: c_back = optarg; break;
+        case O_DB: c_db = optarg; break;             case O_LIVE: c_live = optarg; break;
+        case O_HEAT: c_heat = optarg; break;         case O_OFFICIAL: c_official = 1; break;
+        case O_BIND: c_bind = optarg; break;         case O_PORT: c_port = atoi(optarg); if (c_port < 1 || c_port > 65535) { fprintf(stderr, "candled: bad port %s\n", optarg); return 2; } break;
+        case O_NOTLS: c_tls = 0; break;              case O_INSECURE: c_insecure = 1; break;
+        case O_CERT: c_cert = optarg; break;         case O_KEY: c_key = optarg; break;      case O_AUTHORIZED: c_authz = optarg; break;
+        case O_GENCERT: gencert = 1; break;          case O_FORCE: force = 1; break;         case O_FPR: fpr = 1; break;
+        case O_AUTHORIZE: c_authorize = optarg; break;  case O_COMMENT: c_comment = optarg; break;
+        default: fputs("Try 'candled --help' for more information.\n", stderr); return 2;
+        }
     }
-    signal(SIGPIPE, SIG_IGN);
-    int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
-    if (inet_pton(AF_INET, bind_addr, &a.sin_addr) != 1) { fprintf(stderr, "candled: bad address %s\n", bind_addr); return 2; }
-    if (bind(ls, (struct sockaddr *)&a, sizeof a) < 0 || listen(ls, 16) < 0) { perror("candled: bind"); return 1; }
-    if (rest_enabled) { curl_global_init(CURL_GLOBAL_DEFAULT); pthread_t ot; pthread_attr_t oa; pthread_attr_init(&oa); pthread_attr_setdetachstate(&oa, PTHREAD_CREATE_DETACHED); pthread_create(&ot, &oa, official_thread, NULL); pthread_attr_destroy(&oa); }
-    { pthread_t rt; pthread_attr_t ra; pthread_attr_init(&ra); pthread_attr_setdetachstate(&ra, PTHREAD_CREATE_DETACHED); pthread_create(&rt, &ra, refresher, NULL); pthread_attr_destroy(&ra); }
-    if (dbpath) { pthread_t dt; pthread_attr_t da; pthread_attr_init(&da); pthread_attr_setdetachstate(&da, PTHREAD_CREATE_DETACHED); pthread_create(&dt, &da, dbnames_thread, NULL); pthread_attr_destroy(&da); }
-    fprintf(stderr, "candled: serving %s%s%s%s%s on %s:%d\n", dir, dbpath ? ", the candles of " : "", dbpath ? dbpath : "", dir2 ? ", backfilled from " : "", dir2 ? dir2 : "", bind_addr, port);
-    for (;;) {
-        int fd = accept(ls, NULL, NULL);
-        if (fd < 0) { if (errno == EINTR) continue; perror("accept"); sleep(1); continue; }
-        pthread_mutex_lock(&nconn_mu); int busy = nconn >= 32; if (!busy) nconn++; pthread_mutex_unlock(&nconn_mu);
-        if (busy) { close(fd); continue; }
-        pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-        if (pthread_create(&th, &at, serve, (void *)(intptr_t)fd) != 0) { pthread_mutex_lock(&nconn_mu); nconn--; pthread_mutex_unlock(&nconn_mu); close(fd); }
-        pthread_attr_destroy(&at);
+    if (optind < argc) { fprintf(stderr, "candled: unexpected argument %s\nTry 'candled --help' for more information.\n", argv[optind]); return 2; }
+
+    /* the configuration file: the one named, which must be there, or the default one if there is one */
+    {   char *dflt = joined(SYSCONFDIR, "candled.conf");
+        const char *path = cfgpath ? cfgpath : dflt;
+        if (cfgpath || (dflt && access(dflt, R_OK) == 0)) {
+            if (candled_conf_parse(path, &cf) != 0) { fprintf(stderr, "candled: %s is not a good configuration\n", path); return 2; }
+        }
+        free(dflt);
+    }
+    {   /* what is in force: an option, else the file, else the built-in value */
+        char *d_cert = joined(SYSCONFDIR, "candled/server.crt"), *d_key = joined(SYSCONFDIR, "candled/server.key"), *d_authz = joined(SYSCONFDIR, "candled/authorized-clients");
+        const char *bind_addr = c_bind ? c_bind : cf.listen_addr ? cf.listen_addr : "127.0.0.1";
+        int port = c_port ? c_port : cf.port ? cf.port : 8766;
+        const char *certfile = c_cert ? c_cert : cf.certificate ? cf.certificate : d_cert;
+        const char *keyfile = c_key ? c_key : cf.key ? cf.key : d_key;
+        const char *authzfile = c_authz ? c_authz : cf.authorized ? cf.authorized : d_authz;
+        int tls = c_tls != -1 ? c_tls : cf.tls != -1 ? cf.tls : 1;
+        int insecure = c_insecure != -1 ? c_insecure : cf.insecure != -1 ? cf.insecure : 0;
+        dir = c_dir ? c_dir : cf.candles ? cf.candles : STATEDIR "/candles";
+        dir2 = c_back ? c_back : cf.backfill; dbpath = c_db ? c_db : cf.database; binsdir = c_live ? c_live : cf.live_bins; heatdb = c_heat ? c_heat : cf.heat_db;
+        rest_enabled = c_official != -1 ? c_official : cf.official_klines != -1 ? cf.official_klines : 0;
+        if (!strcmp(bind_addr, "*")) bind_addr = "0.0.0.0";
+
+        if (gencert) {
+            char fp[TLS_FP_LEN];
+            if (tls_gen_cert(certfile, keyfile, force, fp) != 0) return 1;
+            printf("certificate: %s\nprivate key: %s\nserver fingerprint: %s\n", certfile, keyfile, fp);
+            printf("A client pins this fingerprint (wincan: server_pin in wincan.ini); to see it again: candled --fingerprint\n");
+            return 0;
+        }
+        if (fpr) {
+            char fp[TLS_FP_LEN];
+            if (tls_cert_fingerprint(certfile, fp) != 0) return 1;
+            printf("%s\n", fp);
+            return 0;
+        }
+        if (c_authorize) {
+            int r = tls_authz_add(authzfile, c_authorize, c_comment);
+            if (r < 0) return 1;
+            printf(r ? "that client was already authorized (%s)\n" : "authorized: added to %s\n", authzfile);
+            return 0;
+        }
+        if (!tls && !is_loopback(bind_addr) && !insecure) {
+            fprintf(stderr, "candled: refusing to serve plain HTTP on %s: it would be open to the network.  Use TLS, listen on 127.0.0.1, or say 'insecure yes'.\n", bind_addr);
+            return 2;
+        }
+        if (check) {
+            printf("candled: the configuration is good (listening on %s:%d, %s, candles from %s)\n", bind_addr, port, tls ? "TLS with client keys" : "plain HTTP", dir);
+            if (tls && access(certfile, R_OK) != 0) printf("candled: note: no server certificate yet at %s; make one with candled --gen-cert\n", certfile);
+            return 0;
+        }
+        if (tls) {
+            if (access(certfile, R_OK) != 0 || access(keyfile, R_OK) != 0) {
+                fprintf(stderr, "candled: no server certificate and key (%s, %s).  Make them with: candled --gen-cert\n", certfile, keyfile);
+                return 2;
+            }
+            if (tls_server_init(certfile, keyfile) != 0) return 1;
+            tls_authz_set(authzfile, cf.authorize, cf.nauthorize);
+        }
+        use_tls = tls;
+        pidfile_path = c_pid;
+
+        signal(SIGPIPE, SIG_IGN);
+        int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
+        setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
+        if (inet_pton(AF_INET, bind_addr, &a.sin_addr) != 1) { fprintf(stderr, "candled: bad address %s\n", bind_addr); return 2; }
+        if (bind(ls, (struct sockaddr *)&a, sizeof a) < 0 || listen(ls, 16) < 0) { perror("candled: bind"); return 1; }
+        if (daemon_mode) {                                  /* before any thread is made: the children of a fork have only the calling thread */
+            if (daemon(1, 0) != 0) { perror("candled: daemon"); return 1; }
+            openlog("candled", LOG_PID, LOG_DAEMON); daemonized = 1;
+        }
+        if (c_pid) { FILE *pf = fopen(c_pid, "w"); if (pf) { fprintf(pf, "%d\n", (int)getpid()); fclose(pf); } else logmsg("cannot write %s: %s", c_pid, strerror(errno)); }
+        signal(SIGTERM, on_term); signal(SIGINT, on_term);
+        if (rest_enabled) { curl_global_init(CURL_GLOBAL_DEFAULT); pthread_t ot; pthread_attr_t oa; pthread_attr_init(&oa); pthread_attr_setdetachstate(&oa, PTHREAD_CREATE_DETACHED); pthread_create(&ot, &oa, official_thread, NULL); pthread_attr_destroy(&oa); }
+        { pthread_t rt; pthread_attr_t ra; pthread_attr_init(&ra); pthread_attr_setdetachstate(&ra, PTHREAD_CREATE_DETACHED); pthread_create(&rt, &ra, refresher, NULL); pthread_attr_destroy(&ra); }
+        if (dbpath) { pthread_t dt; pthread_attr_t da; pthread_attr_init(&da); pthread_attr_setdetachstate(&da, PTHREAD_CREATE_DETACHED); pthread_create(&dt, &da, dbnames_thread, NULL); pthread_attr_destroy(&da); }
+        logmsg("serving %s%s%s%s%s on %s:%d (%s)", dir, dbpath ? ", the candles of " : "", dbpath ? dbpath : "", dir2 ? ", backfilled from " : "", dir2 ? dir2 : "", bind_addr, port, tls ? "TLS, clients authorized by key" : "plain HTTP");
+        for (;;) {
+            int fd = accept(ls, NULL, NULL);
+            if (fd < 0) { if (errno == EINTR) continue; logmsg("accept: %s", strerror(errno)); sleep(1); continue; }
+            pthread_mutex_lock(&nconn_mu); int busy = nconn >= 32; if (!busy) nconn++; pthread_mutex_unlock(&nconn_mu);
+            if (busy) { close(fd); continue; }
+            pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+            if (pthread_create(&th, &at, serve, (void *)(intptr_t)fd) != 0) { pthread_mutex_lock(&nconn_mu); nconn--; pthread_mutex_unlock(&nconn_mu); close(fd); }
+            pthread_attr_destroy(&at);
+        }
     }
 }
