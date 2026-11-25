@@ -13,7 +13,7 @@ what the server's administrator tells you (candled --fingerprint prints the pin)
 computer's key (an ECDSA P-256 certificate in your personal certificate store, not exportable) and prints its
 fingerprint; the administrator authorizes it with   candled --authorize SHA256:...   and wincan connects.
 
-Other options: -InstallDir, -Desktop, -Startup, -NoKey, -StopRunning, -Launch, -DryRun (say what would be done).
+Other options: -InstallDir, -SettingsDir, -Desktop, -Startup, -NoKey, -StopRunning, -Launch, -DryRun (say what would be done).
 Remove it with uninstall.ps1 (-Purge also removes the settings, the trade log and the key).
 
 For a server on the same computer in plain HTTP (a quick test), -Server 127.0.0.1:8766 needs no key.

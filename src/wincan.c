@@ -339,6 +339,9 @@ static char *http_get(const char *path)
             if (cap - len < 4096) { cap *= 2; char *n = realloc(buf, cap); if (!n) { free(buf); buf = NULL; break; } buf = n; }
         }
         if (buf) { buf[len] = 0; if (code == 200) out = buf; else free(buf); }
+    } else if (r && sent && A.tls && !A.err[0]) {
+        /* with TLS 1.3 the handshake looks complete to the client before the server has looked at its key: a server that does not know the key drops the connection here */
+        snprintf(A.err, sizeof A.err, "the server refused this key (not authorized?)");
     }
     if (r) WinHttpCloseHandle(r);
     if (!ok) http_close();                          /* the connection broke: start again, with the name looked up anew */

@@ -9,6 +9,9 @@
 .PARAMETER InstallDir
     Where wincan.exe was put.  Default: %LOCALAPPDATA%\Programs\wincan
 
+.PARAMETER SettingsDir
+    Where wincan.ini and the trade log are.  Default: %APPDATA%\wincan
+
 .PARAMETER Purge
     Also remove the settings, the trade log and this computer's key.
 
@@ -21,6 +24,7 @@
 [CmdletBinding()]
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\wincan'),
+    [string]$SettingsDir = (Join-Path $env:APPDATA 'wincan'),
     [switch]$Purge,
     [switch]$StopRunning,
     [switch]$DryRun
@@ -30,7 +34,7 @@ function Say([string]$m) { Write-Host $m }
 function Step([string]$what, [scriptblock]$do) { if ($DryRun) { Say "would: $what" } else { Say $what; & $do } }
 
 $exe = Join-Path $InstallDir 'wincan.exe'
-$settingsDir = Join-Path $env:APPDATA 'wincan'
+$settingsDir = $SettingsDir
 $ini = Join-Path $settingsDir 'wincan.ini'
 $running = Get-Process -Name wincan -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }
 if ($running) {

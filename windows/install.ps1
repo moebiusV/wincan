@@ -23,6 +23,9 @@
 .PARAMETER InstallDir
     Where to put wincan.exe.  Default: %LOCALAPPDATA%\Programs\wincan
 
+.PARAMETER SettingsDir
+    Where wincan.ini and the trade log are.  Default: %APPDATA%\wincan  (a different one is for trying things out).
+
 .PARAMETER Desktop
     Also make a shortcut on the Desktop.
 
@@ -52,6 +55,7 @@ param(
     [string]$Server,
     [string]$ServerPin,
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\wincan'),
+    [string]$SettingsDir = (Join-Path $env:APPDATA 'wincan'),
     [switch]$Desktop,
     [switch]$Startup,
     [switch]$NoKey,
@@ -86,7 +90,7 @@ $exeSrc = @((Join-Path $here 'wincan.exe'), (Join-Path $here '..\wincan.exe')) |
 if (-not $exeSrc) { throw "wincan.exe is not next to this script ($here). Unpack the whole release, or build it (make)." }
 $exeSrc = (Resolve-Path $exeSrc).Path
 $exeDst = Join-Path $InstallDir 'wincan.exe'
-$settingsDir = Join-Path $env:APPDATA 'wincan'
+$settingsDir = $SettingsDir
 $ini = Join-Path $settingsDir 'wincan.ini'
 $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\wincan.lnk'
 $appPaths = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\wincan.exe'
