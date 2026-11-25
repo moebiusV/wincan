@@ -11,4 +11,4 @@ Restart=on-failure
 [Install]
 WantedBy=default.target
 
-# also: --heat-db FILE  (the liquidation ladder for wincan's heat strip)
+# also: --heat-db FILE  (a liquidation-map database: the ladder for wincan's heat strip; see candled(8))

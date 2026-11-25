@@ -7,7 +7,7 @@
 2026-11-20  The price line takes the colour of the forming candle; the highest high and lowest low of the bars on show are marked by a dotted line across the window with the value at the left.
 2026-11-20  Candle bodies have an odd width so that the wick is in the middle; the forming candle is two pixels wider and centred on its wick; --scale for tests.
 2026-11-20  Position editor: leverage and realized P&L, resumes at the last box; figures on margin; the log has leverage, margin, realized, total and ROE.
-2026-11-20  candled --db (a candle database candles, authoritative but for the live edge; bounded queries); figures as KuCoin's; the server's address cached in wincan.ini.
+2026-11-20  candled --db (a collector's candle database, authoritative but for the live edge; bounded queries); figures as KuCoin's; the server's address cached in wincan.ini.
 2026-11-20  candled --live-bins (the websocket daemon's closed minutes: database, then bins, then ticks); the price and age from the freshest source; the forming candle drawn like the others.
 2026-11-20  Volume candles toggle; ticks only for the candle forming; markers with milliseconds (reader side).
 2026-11-20  Volume candle width: KuCoin's rule, measured; forming minute's open fixed (merge of forward-filled candles across refreshes).
@@ -28,7 +28,7 @@
 
 2026-11-20  heat strip: candled serves GET /heat?pair=ZEC (--heat-db: a liquidation-map database), the modelled liquidation ladder of src/heat.c; wincan draws it in a strip of 25 program pixels along the bottom (the window is now 300x200): bars at 1, 2, 5, 10 and 20 per cent, longs on the left, shorts on the right, now in the centre, and two balls at the centres of gravity (plain average, white; Newtonian, gold ring).  tests/test_heat.c.
 
-2026-11-20  heat strip: one bar per percentage point (20 a side); /heat serves the cohort ladder (heat2) with the order-book pressure.
+2026-11-20  heat strip: one bar per percentage point (20 a side); /heat serves the cohort ladder (table heat2) with the order-book pressure.
 
 2026-11-20  heat strip: the net-skew ball, (shorts - longs) / (shorts + longs) across the half strip.
 

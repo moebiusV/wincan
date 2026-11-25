@@ -1,5 +1,7 @@
 candled
 wincan.exe
 test_agg
+test_heat
+test_go
 Makefile
 *.tar.gz

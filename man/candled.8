@@ -115,7 +115,7 @@ Bars older than the last interruption of the collector have their order and shap
 returns the modelled liquidation ladder of a pair, one bucket per percentage point from the price (0 to 1 per cent up to 19 to 20), longs below the price (L), shorts above (S),
 from a liquidation-map database, named with
 .BR \-\-heat\-db .
-The database's builder makes the ladder from the open-interest history of Binance, Hyperliquid and KuCoin: every increase is a cohort of positions opened at that price, spread over assumed
+The database's builder makes the ladder from the open-interest history of exchanges: every increase is a cohort of positions opened at that price, spread over assumed
 leverage tiers, and a tier the price has since reached is gone.  The pressure (pl, ps) is made here: the liquidations up to a distance over the order-book depth to the same distance.
 cog is the centre of gravity as a per cent from the price, the mass-weighted mean; cogn weights each level by mass over distance squared.  Without a ladder in the database
 a simple five-tier model stands in.  The leverage mix and the maintenance margin are assumptions, not data.

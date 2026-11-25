@@ -27,8 +27,3 @@ Tests
 -----
 make check   aggregation against a brute-force computation on synthetic files, including a partial frame in the middle of a file.
 The window itself needs a person: the look at 300x175, the drag, the keyboard and the focus rules (wincan(1)).
-
----------------------------------
-shows: `collect --perps` (KuCoin Futures where a contract exists, spot for the rest; volume kept in lots), forward-filled candles for quiet pairs written on time,
-one lock around the files so that the candle writer and the marker writer cannot interleave, a flush once a second, and timestamp markers with milliseconds (see
-candled(8)).  Apply it with  patch -p1  in that project's directory; the unpatched spot behaviour is the default and unchanged.  The websocket daemon fix

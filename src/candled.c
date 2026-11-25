@@ -29,7 +29,7 @@
 #include "heat.h"
 
 #define MAX_PAIRS 512
-static const char *heatdb = NULL;      /* a liquidation-map database: order-book bands, open interest and long/short ratios, for /heat */
+static const char *heatdb = NULL;      /* the liquidation-map database: order-book bands, open interest and long/short ratios, for /heat (candled(8) has its schema) */
 static const char *dir = ".", *dir2 = NULL, *dbpath = NULL, *binsdir = NULL;      /* the files of the live collector, the backfill files (spot), and the database whose candles table is authoritative */
 /* the sources of a coin, in order: the live files (100 ms ticks), the database, the websocket daemon's bins (closed minutes), the backfill files */
 #define NSRC 5
