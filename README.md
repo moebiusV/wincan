@@ -69,7 +69,7 @@ wincan only needs *a candle supply*. `candled` is one; anything that speaks the 
 
 ### Windows: the window
 
-Download `wincan-1.0.0-win64.zip` from the [latest release](https://github.com/moebiusV/wincan/releases/latest), unpack it, and in PowerShell:
+Download `wincan-1.0.0-win64.zip` from the [latest release](https://github.com/moebiusV/wincan/releases/latest), unpack it, open PowerShell in the unpacked folder, and run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File install.ps1 -Server https://HOST:8766 -ServerPin SHA256:... -Launch
