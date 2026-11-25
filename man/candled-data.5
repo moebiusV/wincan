@@ -1,0 +1,103 @@
+.TH CANDLED-DATA 5 "November 2026" "wincan" "File Formats Manual"
+.SH NAME
+candled\-data \- the on\-disk files that candled reads its candles from
+.SH DESCRIPTION
+.BR candled (8)
+makes its candles from files that a collector writes to disk, and this page is the exact format of those files, so that a collector of your own can feed it.  There are two kinds:
+.TP
+.B candle files
+a stream of 30\-byte frames, one candle for each 100 milliseconds: the collector's own files (\fB\-\-dir\fR, and \fB\-\-backfill\fR for the time before the first has data).
+.TP
+.B minute records
+a file of 80\-byte records, one for each closed minute (\fB\-\-live\-bins\fR).
+.PP
+Either may be used alone, or both together.  (candled can also read other sources, which are described in
+.BR candled (8).)
+.PP
+.I contrib/candle\-writer.py
+in the source (installed with the examples) writes both formats, and
+.I tests/test_formats.sh
+writes data with it and reads them back through candled, so what follows is checked.
+.SH PAIRS AND THEIR NAMES
+A pair, the thing a chart shows, is named by 1 to 16 letters or digits, as clients ask for it (wincan asks for upper case, \fBBTC\fR, \fBZEC\fR): no other character is accepted.  The name is kept as it is written, so the files must use the case clients will ask with.
+.PP
+In candle files the pair is the name of the file, \fINAME\fB.bin\fR.  In the directory of minute records it is \fINAME\fBUSDT.bin\fR.
+.PP
+.B /pairs
+lists the candle files that have been written in the last three days, the most recently written first.  The pairs of the minute records are not listed, but may be asked for.
+.SH CANDLE FILES
+A file
+.IB NAME .bin
+is a stream of frames with no header, which the collector keeps appending to.  A frame is 30 bytes:
+.PP
+.nf
+    byte  0       '{'   (0x7B)
+    bytes 1..28   the payload
+    byte  29      '}'   (0x7D)
+.fi
+.PP
+The payload is seven numbers in the byte order of the machine (little\-endian on x86 and ARM), 28 bytes:
+.PP
+.nf
+    offset  0   float32  O   open
+    offset  4   float32  H   high
+    offset  8   float32  L   low
+    offset 12   float32  C   close
+    offset 16   float32  V   volume traded in the 100 ms (0 or more)
+    offset 20   float32  J   not used by candled
+    offset 24   uint32   N   the number of trades
+.fi
+.SS Candles
+There is one candle for each 100 milliseconds.  O, H, L and C are the prices of that 100 ms, V the volume.  When nothing was traded the candle is
+.IR forward\-filled :
+N is 0, all four prices are the last close, V is 0.  When there were trades N is 1 or more.
+.PP
+A candle is believed only if all four prices are above zero, H is not below 0.9999 times the larger of O and C, L is not above 1.0001 times the smaller, H is not more than 1.5 times the larger, and L is not less than half the smaller.  Anything else is a garbage frame, which still counts for its 100 ms of time but is otherwise ignored.  A volume that is negative or 1e13 or more counts as 0.
+.SS Time markers
+Candles carry no time: it comes from time markers.  A marker is a frame whose payload has N = 0xFFFFFFFF, V = \-1.0 and J = NaN; it says when the
+.I next
+candle begins.  The time in whole seconds since the epoch (UTC) is a uint32 in the four bytes of O.  The milliseconds, if the collector has them, are the payload of the NaN in J: a quiet NaN (0x7FC00000) with the low 22 bits holding the milliseconds plus one (0: no milliseconds).  H, L and C are not used.  After a marker the candles are 100 ms apart until the next marker.
+.PP
+Write a marker at the start of the file and at least once a minute (candled places the candles in time by them).  Without any, the modification time of the file stands for the end of the data, and bars older than an interruption of the collector have their order and shape right but their clock times drift by the length of the gap.
+.SS From candles to minute bars
+The candles of a minute make its bar: the open is the open of the first candle with trades (a forward\-filled candle never opens a minute, or sets its high or low: it only repeats the last price), the high and low the extremes of the candles with trades, the close the close of the last candle, the volume the sum.  The bars are made into 3m 5m 15m 30m 1h 4h 1d and 1w bars on request, aligned to UTC (a week begins on Monday).
+.SS Torn files
+A partial frame at the end of the file is ignored until it is complete.  A collector killed in the middle of a write leaves a partial frame, after which the frames sit at another offset; candled finds them again by the \fB{ ... }\fR pattern of three frames in a row.  A file is used only if it has at least 4 frames and the last 3000 bytes of it hold such a run of three.
+.SS Reading
+The first request for a pair reads the newest three days at once, and a background thread then reads the rest of the file, newest part first, into a ring of 600000 one\-minute bars (416 days); until it has finished, answers say
+.B "complete":false.
+Later requests fold in only what has been appended.
+.SH MINUTE RECORDS
+The file
+.IB NAME USDT .bin
+in the \fB\-\-live\-bins\fR directory holds closed minutes only, appended as they close, in records of 80 bytes in the byte order of the machine:
+.PP
+.nf
+    offset  0   int64    ts      start of the minute, Unix seconds, a multiple of 60
+    offset  8   float64  open
+    offset 16   float64  high
+    offset 24   float64  low
+    offset 32   float64  close
+    offset 40   float64  volume
+    offset 48   3 x float64, and offset 72 int32 (trades): not used by candled
+    offset 76   4 bytes of padding
+.fi
+.PP
+A record is believed if ts is above zero and a multiple of 60, the prices are above zero, the high is not below 0.9999 times the larger of open and close, the low not above 1.0001 times the smaller, the high not above 3 times the larger and the low not below a third of the smaller.  A negative volume or one of 1e13 or more counts as 0.  Only the newest 4600 records (a little over three days) are read: the older history is for the other sources.
+.SH BOTH TOGETHER
+When both kinds of file are given, a closed minute is taken from the minute record if there is one and otherwise from the bars made from the candle files (those of \fB\-\-dir\fR first, then \fB\-\-backfill\fR); the minute that is still forming is taken from the candle files, the ticks being newer.  The price and the age of an answer come from the freshest of the live sources.  Minutes that no source has leave a gap: no bar.
+.SH EXAMPLE
+Write both formats, and serve them:
+.PP
+.nf
+    contrib/candle\-writer.py \-\-out /tmp/demo \-\-pair ZEC
+    candled \-\-config /tmp/demo/candled.conf \-\-no\-tls \-\-port 8766
+    curl 'http://127.0.0.1:8766/candles?pair=ZEC&tf=5m&n=3'
+.fi
+.PP
+(\fB\-\-no\-tls\fR is for this loopback test; a real candled uses TLS and authorized client keys, see
+.BR candled (8)).
+.SH SEE ALSO
+.BR candled (8),
+.BR candled.conf (5),
+.BR candle\-protocol (7)

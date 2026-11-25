@@ -21,7 +21,9 @@ and anything else that wants candles.  It writes nothing (except, when it is ask
 .BR candled.conf (5);
 an option overrides the file.
 .PP
-The files are streams of 30\-byte frames, each
+The files are streams of 30\-byte frames (the exact formats are in
+.BR candled\-data (5)),
+each
 .B {
 (a brace), a 28\-byte payload and
 .BR } .
@@ -196,6 +198,7 @@ Without a ladder the notional is modelled in five tiers (1, 2, 5, 10 and 20 per 
 0 on success (and for \-\-help, \-\-version, \-\-check\-config on a good file); 1 for a failure while running or making a key; 2 for a bad option, a bad configuration, or a refusal to start (plain HTTP on a non\-loopback address, TLS without a certificate).
 .SH SEE ALSO
 .BR candled.conf (5),
+.BR candled\-data (5),
 .BR candle\-protocol (7),
 .BR wincan (1),
 .BR wincan (5)

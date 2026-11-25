@@ -160,8 +160,9 @@ See [candled.conf(5)](https://github.com/moebiusV/wincan/blob/main/man/candled.c
 ## A candle supply of your own
 
 wincan asks for `/pairs`, `/candles`, `/range` and `/heat` and gets JSON; the whole protocol is one page,
-[candle-protocol(7)](https://github.com/moebiusV/wincan/blob/main/man/candle-protocol.7). `candled` reads a tick collector's binary files (the frame format is in
-[candled(8)](https://github.com/moebiusV/wincan/blob/main/man/candled.8)) or a SQLite database, but a script that answers those four requests is enough.
+[candle-protocol(7)](https://github.com/moebiusV/wincan/blob/main/man/candle-protocol.7). `candled` reads the binary files a collector writes to disk, 100 ms candles with a time marker every minute, or a file of one-minute
+records, in the exact formats of [candled-data(5)](https://github.com/moebiusV/wincan/blob/main/man/candled-data.5) ([`contrib/candle-writer.py`](https://github.com/moebiusV/wincan/blob/main/contrib/candle-writer.py) writes them, as an example); a script that answers
+those four requests is enough.
 
 ## Building
 

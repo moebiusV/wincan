@@ -73,6 +73,7 @@ fi
 %{_unitdir}/candled.service
 %{_mandir}/man8/candled.8*
 %{_mandir}/man5/candled.conf.5*
+%{_mandir}/man5/candled-data.5*
 %{_mandir}/man7/candle-protocol.7*
 
 %files windows

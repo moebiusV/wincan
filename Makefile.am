@@ -26,9 +26,9 @@ test_go_SOURCES = tests/test_go.c src/gomatch.h
 test_conf_SOURCES = tests/test_conf.c
 test_conf_LDADD = libcandledconf.a
 
-TESTS = test_agg test_heat test_go test_conf tests/test_tls.sh tests/no-private.sh
+TESTS = test_agg test_heat test_go test_conf tests/test_tls.sh tests/test_formats.sh tests/no-private.sh
 AM_TESTS_ENVIRONMENT = srcdir='$(srcdir)'; export srcdir; CANDLED='$(abs_builddir)/candled'; export CANDLED;
-dist_check_SCRIPTS = tests/test_tls.sh tests/no-private.sh
+dist_check_SCRIPTS = tests/test_tls.sh tests/test_formats.sh tests/no-private.sh
 
 # ---------------------------------------------------------------- wincan.exe, the window (a Windows program, built with MinGW-w64)
 WINCFLAGS = -O2 -std=gnu11 -Wall -Wextra
@@ -73,14 +73,14 @@ installcheck-local:
 
 # ---------------------------------------------------------------- service files, examples, documents
 examplesdir = $(docdir)/examples
-dist_examples_DATA = contrib/candled.conf.sample
+dist_examples_DATA = contrib/candled.conf.sample contrib/candle-writer.py
 nodist_examples_DATA = contrib/candled.service contrib/candled.openrc
 
 if HAVE_SYSTEMD
 systemdsystemunit_DATA = contrib/candled.service
 endif
 
-dist_man_MANS = man/candled.8 man/candled.conf.5 man/candle-protocol.7 man/wincan.1 man/wincan.5
+dist_man_MANS = man/candled.8 man/candled.conf.5 man/candled-data.5 man/candle-protocol.7 man/wincan.1 man/wincan.5
 dist_doc_DATA = README NEWS AUTHORS THANKS
 
 EXTRA_DIST = ChangeLog HACKING README.md src/wincan.c tools/mkpages.sh \

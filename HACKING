@@ -13,7 +13,7 @@ Layout
   grammars/            candled.hbnf, the grammar of candled.conf
   windows/             the PowerShell installer; linux/ the installer of the daemon; debian/ and contrib/ packaging
   tests/               unit tests (C) and the end-to-end TLS test (sh, with curl and openssl)
-  man/                 candled(8), candled.conf(5), candle-protocol(7), wincan(1), wincan(5)
+  man/                 candled(8), candled.conf(5), candled-data(5), candle-protocol(7), wincan(1), wincan(5)
 
 Building from a checkout
 ------------------------
@@ -41,7 +41,8 @@ newer hbnf.
 
 Tests
 -----
-  make check    unit tests, the config accept/reject files, the TLS test (candled against curl and openssl: authorized,
+  make check    unit tests, the config accept/reject files, the formats test (candled-data(5): contrib/candle-writer.py writes
+                the on-disk formats, candled reads them back), the TLS test (candled against curl and openssl: authorized,
                 unauthorized, no certificate, plain HTTP, the safety refusals) and tests/no-private.sh.
   tests/no-private.sh fails if the tree names a local user, a host, an absolute local path or a private project: use
   $HOME, /var/lib/candled, example.org in documents and comments.

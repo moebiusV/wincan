@@ -1,3 +1,7 @@
+wincan after 1.1.0:
+  candled-data(5) documents the on-disk formats candled reads (the 30-byte frames of the candle files and the 80-byte minute records), contrib/candle-writer.py
+  writes them as an example, and tests/test_formats.sh reads them back through candled.
+
 wincan 1.1.0 (2026-11-25)
   A smooth first start: with no settings wincan asks where the candles come from (a small box); with an https:// server and no key it offers to make
   the computer's key (one Yes or No; "no" is remembered), keeps it in Windows' key storage, and puts the command for the server's administrator on
