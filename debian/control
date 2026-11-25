@@ -1,0 +1,38 @@
+Source: wincan
+Section: utils
+Priority: optional
+Maintainer: David Walther <david@clearbrookdistillery.com>
+Build-Depends: debhelper-compat (= 13), gcc-mingw-w64-x86-64, libcurl4-openssl-dev, libsqlite3-dev, libssl-dev, autoconf, automake
+Standards-Version: 4.7.0
+Homepage: https://github.com/moebiusV/wincan
+Rules-Requires-Root: no
+
+Package: candled
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser
+Description: candle server for wincan: JSON candles over TLS, clients authorized by key
+ candled serves candles (open, high, low, close, volume) from a collector's
+ files or a SQLite database as JSON over HTTP.  It listens on the loopback
+ address unless told otherwise, speaks TLS, and answers only the clients whose
+ key it has been told, by the SHA-256 fingerprint of the client's own
+ certificate (as an IRC bouncer does with certfp).  It also serves a modelled
+ liquidation ladder for wincan's heat strip.
+ .
+ The settings are in /etc/candled.conf.  Make it let a wincan in with
+ "candled --authorize SHA256:...".
+
+Package: wincan-windows
+Architecture: all
+Depends: ${misc:Depends}
+Recommends: candled
+Description: wincan, the candle window for the Windows desktop, with its installer
+ wincan.exe is a small frameless always-on-top candle chart window for Windows
+ (candles, indicators, position profit and loss, a liquidation heat strip),
+ fed by candled or any program that speaks the candle protocol.  This package
+ holds the Windows program and a PowerShell installer for it, for use from a
+ Debian or Ubuntu system, for example under WSL2:
+ .
+  powershell.exe -ExecutionPolicy Bypass \
+    -File "$(wslpath -w /usr/share/wincan/windows/install.ps1)"
+ .
+ The program itself is not run or used on Linux.

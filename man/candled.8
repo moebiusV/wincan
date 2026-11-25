@@ -3,9 +3,13 @@
 candled \- serve candles from a collector's binary files, as JSON
 .SH SYNOPSIS
 .B candled
-.B \-\-dir
-.I DIR
-[\fB\-\-db\fR \fIFILE\fR] [\fB\-\-live\-bins\fR \fIDIR\fR] [\fB\-\-backfill\fR \fIDIR\fR] [\fB\-\-port\fR \fIN\fR] [\fB\-\-bind\fR \fIADDRESS\fR]
+[\fIOPTION\fR]...
+.br
+.B candled \-\-gen\-cert
+|
+.B \-\-fingerprint
+|
+.BI \-\-authorize " FINGERPRINT\fR [\fB\-\-comment\fR \fITEXT\fR]" 
 .SH DESCRIPTION
 .B candled
 reads the files
@@ -13,10 +17,9 @@ reads the files
 that a candle collector appends to continuously, aggregates them with rolling windows, and answers
 read\-only HTTP requests from
 .BR wincan (1)
-and anything else that wants candles.  It writes nothing and keeps no secrets; it listens on all
-addresses unless
-.B \-\-bind
-is given, so put it behind a firewall that admits only the machines that should ask.
+and anything else that wants candles.  It writes nothing (except, when it is asked to, its own key and the list of clients that are let in); it listens on the loopback address unless told otherwise, speaks TLS, and answers only a client whose key has been authorized (see SECURITY).  Its settings are in
+.BR candled.conf (5);
+an option overrides the file.
 .PP
 The files are streams of 30\-byte frames, each
 .B {
@@ -36,7 +39,7 @@ appended.  The timeframes 1m 3m 5m 15m 30m 1h 4h 1d 1w are made from the minute 
 .SH OPTIONS
 .TP
 .BI \-\-dir " DIR"
-the directory of the .bin files (default: the current directory).
+the directory of the .bin files (default: \fIcandles\fR in the state directory, /var/lib/candled/candles in a packaged install).
 .TP
 .BI \-\-db " FILE"
 a SQLite database with a table or view
@@ -65,39 +68,58 @@ is read.
 the TCP port (default 8766).
 .TP
 .BI \-\-bind " ADDRESS"
-an IPv4 address to listen on (default 0.0.0.0).
+.B *
+for all addresses; default 127.0.0.1).  An address that is open to a network should have a firewall in front of it.
+.TP
+.BI \-\-config " FILE" ", \-c"
+the configuration file (default: candled.conf in the system configuration directory, if there is one).
+.TP
+.BR \-\-check\-config ", " \-t
+read the configuration, say whether it is good, and exit.
+.TP
+.B \-\-official\-klines
+see OFFICIAL CANDLES AND THE MARK PRICE.
+.TP
+.B \-\-no\-tls
+plain HTTP, without keys: only on a loopback address, unless
+.B \-\-insecure
+is also given.
+.TP
+.B \-\-insecure
+allow plain HTTP on any address.
+.TP
+.BI \-\-certificate " FILE\fR, \fB\-\-key\fR \fIFILE"
+the server's certificate and private key, PEM (default: server.crt and server.key in the candled directory of the system configuration directory).
+.TP
+.BI \-\-authorized " FILE"
+the file of the fingerprints of the clients that are let in (default: authorized\-clients there).
+.TP
+.BR \-\-daemon ", " \-D
+run in the background; messages go to the system log.
+.TP
+.BI \-\-pidfile " FILE" ", \-P"
+write the process id to the file (and remove it when stopped by SIGTERM or SIGINT).
+.TP
+.B \-\-gen\-cert
+make the server's key (mode 0600) and a self\-signed certificate (an EC P\-256 key, valid ten years), print the certificate's fingerprint, and exit.  Existing files are kept unless
+.B \-\-force
+is given.
+.TP
+.B \-\-fingerprint
+print the fingerprint of the server's certificate and exit.
+.TP
+.BI \-\-authorize " FINGERPRINT"
+let in the client whose certificate has this SHA\-256 fingerprint (see SECURITY): add it to the authorized file, with
+.BI \-\-comment " TEXT"
+as a note, and exit.  A running candled picks it up at once.
+.TP
+.BR \-\-help ", " \-\-version
+display help or version information and exit.
+.PP
 A thread keeps the windows up to date apart from the requests: every loaded pair once a minute, and a pair that has been asked for in the last five seconds every 100 milliseconds, so that a request is answered from memory.  Clients should poll about once a second.
 .SH PROTOCOL
-Only GET.  Answers are JSON; errors are an object with an
-.B error
-member.
-.TP
-.B /pairs
-the names of the usable files written in the last three days, the most recently written first: \fB["BTC","ETH",...]\fR.
-.TP
-.B /candles?pair=BTC&tf=5m&n=60
-the last
-.I n
-bars (at most 500; a gap in the data leaves no bar) of a timeframe, oldest first, as
-.B {"pair","tf","price","age_ms","complete","n","t":[...],"o":[...],"h":[...],"l":[...],"c":[...],"v":[...]}.
-.B t
-is the start of each bar in seconds since the epoch;
-.B price
-is the last close;
-.B age_ms
-is the time since the collector's last candle (a collector that has stopped shows a growing age);
-.B complete
-is false while the older history is still being read.
-.B sig
-is a signature of the last two bars.  A client that polls sends it back as
-.BR sig=... ,
-with a small
-.BR n ,
-usually 2: if nothing has changed (as in a second without a trade) the answer is only
-.B {"unchanged":true,"sig":...,"price":...,"age_ms":...,"complete":...}\fR,
-otherwise the last
-.I n
-bars, to be merged by their start times into what the client already has.
+The requests and the answers are described in
+.BR candle\-protocol (7).
 .SH OFFICIAL CANDLES AND THE MARK PRICE
 With
 .B \-\-official\-klines
@@ -107,15 +129,73 @@ The price and age of an answer never come from the official candles.
 .SH LIMITS
 Without markers (the start of an old file, a stalled collector) the file's modification time stands for the end of the data.
 Bars older than the last interruption of the collector have their order and shape right but their clock times drift by the length of the gap.
+.SH SECURITY
+candled has no passwords.  It treats a client as an IRC bouncer treats a client certificate (certfp, SASL EXTERNAL): each client makes a key and a self\-signed certificate of its own, the server is told the SHA\-256 fingerprint of that certificate, and a client whose fingerprint is not on the list gets no answer.  The private key never leaves the client, and traffic is encrypted (TLS 1.2 or later).
+.PP
+The server's certificate is self\-signed too.  The client pins its fingerprint, so there is no certificate authority to trust or to be fooled.
+.TP
+.B on the server
+.B candled \-\-gen\-cert
+once; it prints the server's fingerprint (again with
+.BR "candled \-\-fingerprint" ).
+The key must be readable by the user that candled runs as.
+.TP
+.B on the client
+the Windows installer of wincan makes the key (in the user's certificate store) and prints its fingerprint, as does
+.BR "wincan \-\-fingerprint" .
+Any other client can use
+.B openssl x509 \-in client.crt \-noout \-fingerprint \-sha256 .
+Give the client the server's fingerprint (wincan: \fBserver_pin\fR in wincan.ini).
+.TP
+.B to let a client in
+.B candled \-\-authorize
+.I SHA256:\&...
+(the digits may be in any of the usual forms: \fBSHA256:ab12...\fR, \fBAB:12:...\fR, or openssl's own output).
+.PP
+The authorized file has one fingerprint on a line, and may have notes after a
+.BR # .
+A client that connects without a certificate, or with one that is not on the list, is refused, and the refusal is logged with its fingerprint, which is what to pass to
+.BR \-\-authorize .
+Plain HTTP, which has no keys, is only for a loopback address unless
+.B insecure
+is said.
+.SH FILES
+.TP
+.I /etc/candled.conf
+the configuration, see
+.BR candled.conf (5).
+.TP
+.I /etc/candled/server.crt, server.key
+the server's certificate and private key.
+.TP
+.I /etc/candled/authorized\-clients
+the fingerprints of the clients that are let in.
+.TP
+.I /var/lib/candled/
+the usual place for the candle files.
+.PP
+(The directories are those of the system configuration and state directories that candled was built with.)
+.SH HEAT DATABASE
+.B \-\-heat\-db
+names a read\-only SQLite database that holds what the heat strip of wincan shows; whatever builds it is not part of this package.  The symbols are the exchange's futures contracts, named like \fBZECUSDTM\fR (BTC is \fBXBTUSDTM\fR).  The tables are:
+.TP
+.B oi (pair, ts, oi_usd, mark)
+the open interest in dollars and the mark price; the newest row of a pair.  Without one there is no answer (404).
+.TP
+.B bn (pair, ts, global_ls)
+the long/short account ratio; the newest row that has one.
+.TP
+.B book_bands (pair, ts, mid, bid_cov, ask_cov, b1, b2, b5, b10, b20, a1, a2, a5, a10, a20)
+the order book's cumulative depth within 1, 2, 5, 10 and 20 per cent of the mid price, bids and asks; the newest row.
+.TP
+.B heat2 (pair, ts, price, cog, cogn, liq_long, liq_short, src)
+the ladder: the liquidation notional of each percentage point from the price, 20 comma\-separated numbers for the longs (below the price) and 20 for the shorts, and the two centres of gravity (a per cent from the price).  A ladder older than ten minutes is not used.
+.PP
+Without a ladder the notional is modelled in five tiers (1, 2, 5, 10 and 20 per cent) from the open interest and the ratio.  The pressure (pl, ps) is made here: the liquidations up to a distance over the order\-book depth to the same distance.  The leverage mix and the maintenance margin are assumptions, not data.
+.SH EXIT STATUS
+0 on success (and for \-\-help, \-\-version, \-\-check\-config on a good file); 1 for a failure while running or making a key; 2 for a bad option, a bad configuration, or a refusal to start (plain HTTP on a non\-loopback address, TLS without a certificate).
 .SH SEE ALSO
+.BR candled.conf (5),
+.BR candle\-protocol (7),
 .BR wincan (1),
 .BR wincan (5)
-.SH LIQUIDATION LADDER
-.B GET /heat?pair=ZEC
-returns the modelled liquidation ladder of a pair, one bucket per percentage point from the price (0 to 1 per cent up to 19 to 20), longs below the price (L), shorts above (S),
-from a liquidation-map database, named with
-.BR \-\-heat\-db .
-The database's builder makes the ladder from the open-interest history of exchanges: every increase is a cohort of positions opened at that price, spread over assumed
-leverage tiers, and a tier the price has since reached is gone.  The pressure (pl, ps) is made here: the liquidations up to a distance over the order-book depth to the same distance.
-cog is the centre of gravity as a per cent from the price, the mass-weighted mean; cogn weights each level by mass over distance squared.  Without a ladder in the database
-a simple five-tier model stands in.  The leverage mix and the maintenance margin are assumptions, not data.

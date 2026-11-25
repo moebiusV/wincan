@@ -1,0 +1,42 @@
+# APKBUILD -- Alpine packaging (candled, its OpenRC service, and the Windows files).
+# BEST EFFORT AND NOT YET TESTED on Alpine; the Debian packaging in debian/ is the tested one.
+# Maintainer: David Walther <david@clearbrookdistillery.com>
+pkgname=wincan
+pkgver=1.0.0
+pkgrel=0
+pkgdesc="Candle server (candled) for wincan, and the Windows candle window"
+url="https://github.com/moebiusV/wincan"
+arch="all"
+license="GPL-3.0-or-later AND ISC"
+makedepends="sqlite-dev curl-dev openssl-dev mingw-w64-gcc"
+subpackages="$pkgname-openrc $pkgname-doc $pkgname-windows:_windows:noarch"
+source="$pkgname-$pkgver.tar.gz::https://github.com/moebiusV/wincan/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz"
+pkgusers="candled"
+pkggroups="candled"
+install="$pkgname.pre-install $pkgname.post-install"
+sha512sums="SKIP"
+
+build() {
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --mandir=/usr/share/man
+	make
+}
+
+check() {
+	make check
+}
+
+package() {
+	make DESTDIR="$pkgdir" install
+	install -Dm755 contrib/candled.openrc "$pkgdir"/etc/init.d/candled
+}
+
+_windows() {
+	pkgdesc="wincan.exe and its PowerShell installer, for use from a Linux system (WSL2)"
+	depends=""
+	mkdir -p "$subpkgdir"/usr/share
+	mv "$pkgdir"/usr/share/wincan "$subpkgdir"/usr/share/
+}
+
+# $pkgname.pre-install:   addgroup -S candled 2>/dev/null; adduser -S -D -H -h /var/lib/candled -s /sbin/nologin -G candled candled 2>/dev/null; exit 0
+# $pkgname.post-install:  mkdir -p /var/lib/candled/candles /etc/candled; chown -R candled:candled /var/lib/candled;
+#                         [ -e /etc/candled/server.key ] || candled --gen-cert; chown root:candled /etc/candled/server.*; chmod 640 /etc/candled/server.key

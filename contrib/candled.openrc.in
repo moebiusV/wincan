@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+# An OpenRC service for candled (Alpine and others).  Copy it to /etc/init.d/candled, make it executable and
+#     rc-update add candled default && rc-service candled start
+# linux/install-candled.sh does this, and makes the user and the key.
+description="candled: candles for wincan, as JSON over TLS"
+command="@sbindir@/candled"
+command_args="--config @sysconfdir@/candled.conf"
+command_user="@CANDLED_USER@:@CANDLED_USER@"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/candled.log"
+error_log="/var/log/candled.log"
+
+depend() {
+    need net
+}

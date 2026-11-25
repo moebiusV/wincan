@@ -1,0 +1,8 @@
+#! /bin/sh
+# bootstrap -- make configure and the Makefile.in files from configure.ac and Makefile.am, when working
+# from a checkout of the repository (a release tarball already has them).  Needs autoconf and automake.
+set -e
+cd "$(dirname "$0")"
+mkdir -p m4 build-aux
+autoreconf --force --install --verbose
+echo "bootstrap: now  ./configure && make && make check"

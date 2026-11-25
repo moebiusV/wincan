@@ -1,0 +1,42 @@
+# candled.conf -- the configuration of candled(8); see candled.conf(5).
+#
+# Every line is a directive: a keyword and its argument.  Strings are in double quotes; `#` starts a
+# comment.  A command-line option of candled overrides the file.  The values below are the defaults
+# (the directories are those of a packaged install; change them to where your candle files are).
+
+# -- who may connect ---------------------------------------------------------------------------
+# candled listens on the loopback address only: a wincan on the same computer (or on Windows, with
+# candled in WSL2) reaches it as localhost.  To serve other computers, listen on an address they can
+# reach (or `*` for all) and put a firewall in front of the port: only clients whose key is authorized
+# get an answer, but the port is open.
+listen 127.0.0.1
+port 8766
+
+# Connections are encrypted (TLS) and every client proves who it is with a key of its own, as with
+# an IRC bouncer's certfp: the client makes its key and tells you its fingerprint, and you authorize it:
+#     candled --authorize SHA256:...        (wincan --fingerprint prints it; the Windows installer shows it)
+# The server's key and certificate are made once with `candled --gen-cert`.
+tls yes
+certificate "/etc/candled/server.crt"
+key "/etc/candled/server.key"
+authorized "/etc/candled/authorized-clients"
+# A client may also be named here instead of in the file:
+# authorize "SHA256:0000000000000000000000000000000000000000000000000000000000000000"
+
+# Plain HTTP, without keys, is for a loopback address (a quick test).  Anywhere else it must be said:
+# insecure no
+
+# -- where the candles are ---------------------------------------------------------------------
+# The directory of the collector's NAME.bin files (the frame format is in candled(8)).
+candles "/var/lib/candled/candles"
+# A second directory, used for the time before the first one has data (for example spot candles
+# before the perpetual futures' began):
+# backfill "/var/lib/candled/candles-spot"
+# A SQLite database with a table `candles` of one-minute candles:
+# database "/var/lib/candled/candles.db"
+# A websocket daemon's directory of NAMEUSDT.bin files of one-minute candles:
+# live-bins "/var/lib/candled/bins"
+# A liquidation-map database for wincan's heat strip (candled(8) says what it holds):
+# heat-db "/var/lib/candled/heat.db"
+# Fetch the exchange's own candles of the last minutes, and the mark price:
+# official-klines no

@@ -1,0 +1,6 @@
+wincan (1.0.0-1) unstable; urgency=medium
+
+  * First release: candled with a configuration file, TLS and client keys,
+    and wincan.exe with its Windows installer.
+
+ -- David Walther <david@clearbrookdistillery.com>  Tue, 24 Nov 2026 21:28:16 -0800

@@ -1,0 +1,8 @@
+# GitHub Pages (Jekyll) settings for the project site; the page itself, index.md, is made from README.md by tools/mkpages.sh
+title: wincan
+description: A candle chart for the Windows desktop, and the server that feeds it
+theme: jekyll-theme-cayman
+show_downloads: false
+markdown: kramdown
+kramdown:
+  parse_block_html: true

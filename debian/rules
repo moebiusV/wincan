@@ -1,0 +1,13 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+override_dh_auto_configure:
+	dh_auto_configure -- --docdir=/usr/share/doc/candled --with-systemdsystemunitdir=/usr/lib/systemd/system
+
+# one install, split into the two packages by the .install files
+override_dh_auto_install:
+	dh_auto_install --destdir=debian/tmp
+
+override_dh_installsystemd:
+	dh_installsystemd --name=candled

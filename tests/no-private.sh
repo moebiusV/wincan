@@ -6,8 +6,8 @@ cd "$(dirname "$0")/.." || exit 2          # the top of the source tree, whereve
 # the patterns are written in pieces so that this file does not match itself
 pat="/ho""me/|/m""nt/|/U""sers/|[a-z]:\\\\Users\\\\|192\\.168\\.|10\\.[0-9]+\\.[0-9]+\\.[0-9]+|m""amba|crypto-""scanner|liq""map|crypto""\\.db|silent""pc|matt""hew"
 bad=$(grep -rIn -E "$pat" . \
-        --exclude-dir=.git --exclude-dir=autom4te.cache --exclude-dir=.deps \
-        --exclude=no-private.sh --exclude=COPYING --exclude='config.*' --exclude='*.o' 2>/dev/null \
+        --exclude-dir=.git --exclude-dir=autom4te.cache --exclude-dir=.deps --exclude-dir=_build --exclude-dir=_inst --exclude-dir='wincan-*' \
+        --exclude=no-private.sh --exclude=COPYING --exclude='config.*' --exclude='*.o' --exclude='*.log' --exclude='*.trs' --exclude='*.tar.*' 2>/dev/null \
       | grep -v -E '^\./(Makefile|Makefile\.in|configure|aclocal\.m4|libtool|stamp-h1)[:]' \
       | grep -v -E 'example|EXAMPLE|C:\\Users\\alice|/Users/alice')
 if [ -n "$bad" ]; then

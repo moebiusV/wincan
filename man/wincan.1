@@ -3,7 +3,7 @@
 wincan \- a small frameless candle chart window for Windows
 .SH SYNOPSIS
 .B wincan.exe
-[\fB\-\-server\fR \fIHOST:PORT\fR] [\fB\-\-pair\fR \fINAME\fR] [\fB\-\-tf\fR \fIFRAME\fR]
+[\fB\-\-server\fR [\fBhttps://\fR]\fIHOST:PORT\fR] [\fB\-\-pair\fR \fINAME\fR] [\fB\-\-tf\fR \fIFRAME\fR]
 .SH DESCRIPTION
 .B wincan
 shows the candles and last price of one coin, from a
@@ -69,8 +69,14 @@ one line is appended to
 Only one copy runs: starting a second finds the first, shows its window (it may be hidden in the tray) and exits.
 .SH OPTIONS
 .TP
-.BI \-\-server " HOST:PORT"
-the server (also kept in the settings file).
+.BI \-\-server " \fR[\fBhttps://\fR]\fIHOST:PORT"
+the candle supply (also kept in the settings file).  With https:// the connection is encrypted and authenticated by a key of this computer's own, which the server must have authorized, and the server's certificate is pinned (see wincan(5): client_cert, server_pin).
+.TP
+.B \-\-fingerprint
+print the SHA\-256 fingerprint of this computer's key, for \fBcandled \-\-authorize\fR, and exit.
+.TP
+.BR \-\-help ", " \-\-version
+display help or version information and exit (on the console that started wincan, else in a message box).
 .TP
 .BI \-\-pair " NAME" ", " \-\-tf " FRAME"
 start with this coin and timeframe.

@@ -7,8 +7,30 @@ is a Windows INI file that the program writes when the window is moved and at ex
 .SS [wincan]
 .TP
 .B server
+.RI [ https:// ] HOST:PORT
+of the candle supply (default localhost:8766).  With
+.B https://
+the connection is encrypted and wincan proves who it is with the key named by
+.BR client_cert ;
+plain
 .I HOST:PORT
-of the candled server (default localhost:8766).
+is plain HTTP, for a loopback address.
+.TP
+.B client_cert
+the SHA\-1 thumbprint (40 hexadecimal digits) of the certificate in the user's personal certificate store (CurrentUser\\My) that wincan shows to an https:// server.  The Windows installer makes the key and writes this; for a key made by hand, in PowerShell:
+.PP
+.nf
+New\-SelfSignedCertificate \-Subject "CN=wincan client" \-KeyAlgorithm ECDSA_nistP256 \e
+    \-KeyExportPolicy NonExportable \-CertStoreLocation Cert:\eCurrentUser\eMy
+.fi
+.PP
+(with the client authentication usage); the thumbprint it prints is the value of client_cert.
+The private key stays in the store.  \fBwincan \-\-fingerprint\fR prints the certificate's SHA\-256 fingerprint, which the server's administrator authorizes (\fBcandled \-\-authorize\fR).
+.TP
+.B server_pin
+.TQ
+.B server_pin_for
+the SHA\-256 fingerprint of the server's certificate (\fBSHA256:\fR and 64 hexadecimal digits, as \fBcandled \-\-gen\-cert\fR printed it) and the server it is for.  A server whose certificate is another is refused.  If there is none, the first contact sets it and says so once (trust on first use); to change the server's certificate, remove these two lines.
 .TP
 .B pair
 the coin shown (default BTC).

@@ -7,7 +7,12 @@
  *
  * See candled(8).
  */
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "agg.h"
 #include <stdio.h>
 #include <stdlib.h>

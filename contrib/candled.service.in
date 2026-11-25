@@ -1,0 +1,33 @@
+# A systemd unit for candled.  Installed where --with-systemdsystemunitdir said, else only an example
+# (copy it to /etc/systemd/system/).  The linux/install-candled.sh script does all of this:
+#     useradd --system candled; candled --gen-cert; chown the key to the user; systemctl enable --now candled
+[Unit]
+Description=candled: candles for wincan, as JSON over TLS, to clients whose keys are authorized
+Documentation=man:candled(8) man:candled.conf(5)
+After=network.target
+
+[Service]
+Type=simple
+User=@CANDLED_USER@
+Group=@CANDLED_USER@
+ExecStart=@sbindir@/candled --config @sysconfdir@/candled.conf
+Restart=on-failure
+RestartSec=3
+# candled only reads: the candle files, its configuration and its key.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

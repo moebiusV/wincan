@@ -1,0 +1,61 @@
+Working on wincan
+=================
+
+Layout
+------
+  src/candled.c        the server: requests, sources, options, the main loop
+  src/agg.c            rolling aggregation of the 100 ms candles into minute bars and timeframes
+  src/heat.c           the simple liquidation model behind /heat
+  src/tls.c            TLS, the server's certificate, fingerprints, the authorized clients
+  src/candled_conf.c   the parser of candled.conf (GENERATED, see below) and src/hbnf_conf.{c,h}, its runtime
+  src/wincan.c         the Windows window: GDI drawing, WinHTTP, the key in the certificate store
+  src/gomatch.h        the matching of the 'g' go-to box
+  grammars/            candled.hbnf, the grammar of candled.conf
+  windows/             the PowerShell installer; linux/ the installer of the daemon; debian/ and contrib/ packaging
+  tests/               unit tests (C) and the end-to-end TLS test (sh, with curl and openssl)
+  man/                 candled(8), candled.conf(5), candle-protocol(7), wincan(1), wincan(5)
+
+Building from a checkout
+------------------------
+  ./bootstrap && ./configure && make && make check
+
+(a release tarball has configure already).  wincan.exe is built if MinGW-w64 is found (x86_64-w64-mingw32-gcc;
+Debian: gcc-mingw-w64-x86-64); otherwise only candled is.  make distcheck builds, checks, installs and uninstalls
+from a fresh tarball: run it before a release.
+
+The configuration parser is generated
+--------------------------------------
+src/candled_conf.c is made by hbnf, the parser generator meta compiler (https://github.com/moebiusV/hbnf), from
+grammars/candled.hbnf.  It is committed, and the build never needs hbnf.  To change what candled.conf can say:
+
+  1. edit grammars/candled.hbnf (a keyword, its argument, and the action that fills struct candled_conf);
+  2. edit src/candled_conf.h (the field) and src/candled.c (what candled does with it);
+  3. build hbnf (git clone https://github.com/moebiusV/hbnf; gprbuild -P hbnf.gpr; on a system without the static Ada
+     runtime link it dynamically by removing "-static" from a copy of hbnf.gpr) and run
+         make regen-conf HBNF=/path/to/hbnf HBNF_TEMPLATES=/path/to/hbnf/templates
+  4. add accept/reject files to tests/conf and a line to tests/test_conf.c; document the directive in man/candled.conf.5
+     and contrib/candled.conf.sample.
+
+src/hbnf_conf.c and hbnf_conf.h are copied unchanged from hbnf's runtime/; copy them again when you regenerate with a
+newer hbnf.
+
+Tests
+-----
+  make check    unit tests, the config accept/reject files, the TLS test (candled against curl and openssl: authorized,
+                unauthorized, no certificate, plain HTTP, the safety refusals) and tests/no-private.sh.
+  tests/no-private.sh fails if the tree names a local user, a host, an absolute local path or a private project: use
+  $HOME, /var/lib/candled, example.org in documents and comments.
+  The window needs a person: the look at 300x175, the drag, the keyboard and the focus rules, full screen, the snap
+  of the pointer (wincan(1)).  wincan.exe --shot FILE.bmp (with --shot-full WxH, --shot-mouse Y, --shot-mousex X,
+  --shot-on/--shot-off N) draws a picture without a person, which is how the layout is checked.
+
+Style
+-----
+C11, the style of the file you are in, comments that say why.  A change to behaviour changes the manual page, NEWS and
+ChangeLog in the same commit.
+
+Packaging
+---------
+debian/ builds with  dpkg-buildpackage -us -uc -b  (candled, and wincan-windows with the Windows files).  contrib/wincan.spec
+(RPM) and contrib/APKBUILD (Alpine) are written but not tested.  linux/install-candled.sh installs from a source tree
+on Debian, Ubuntu (WSL2 too), Fedora and relatives, and Alpine.

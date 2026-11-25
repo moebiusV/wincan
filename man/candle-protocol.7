@@ -1,0 +1,93 @@
+.TH CANDLE-PROTOCOL 7 "November 2026" "wincan" "Miscellaneous Information Manual"
+.SH NAME
+candle\-protocol \- the HTTP protocol between a candle window and a candle supply
+.SH DESCRIPTION
+.BR wincan (1)
+shows candles that a candle supply serves over HTTP, as JSON.
+.BR candled (8)
+is such a supply; anything that speaks this protocol can be one (a script over an exchange's feed, say), and wincan needs nothing else from it.
+.SH TRANSPORT
+HTTP/1.1 with keep\-alive, GET only; a client polls about once a second.  The connection is either
+.B https
+(TLS 1.2 or later), in which the client shows a certificate of its own and is let in by the SHA\-256 fingerprint of that certificate, while the client pins the fingerprint of the server's self\-signed certificate (see
+.BR candled (8),
+SECURITY), or plain
+.B http
+on a loopback address.  A supply that is open to a network should be the first kind.
+.SH REQUESTS
+Only GET.  Answers are JSON; errors are an object with an
+.B error
+member.
+.TP
+.B /pairs
+the names of the usable files written in the last three days, the most recently written first: \fB["BTC","ETH",...]\fR.
+.TP
+.B /candles?pair=BTC&tf=5m&n=60
+the last
+.I n
+bars (at most 500; a gap in the data leaves no bar) of a timeframe, oldest first, as
+.RS
+.nf
+{"pair", "tf", "price", "age_ms", "complete", "n",
+ "t":[...], "o":[...], "h":[...], "l":[...], "c":[...], "v":[...]}
+.fi
+.RE
+.PP
+.B t
+is the start of each bar in seconds since the epoch;
+.B price
+is the last close;
+.B age_ms
+is the time since the collector's last candle (a collector that has stopped shows a growing age);
+.B complete
+is false while the older history is still being read.
+.B sig
+is a signature of the last two bars.  A client that polls sends it back as
+.BR sig=... ,
+with a small
+.BR n ,
+usually 2: if nothing has changed (as in a second without a trade) the answer is only
+.B {"unchanged":true,"sig":...,"price":...,"age_ms":...,"complete":...}\fR,
+otherwise the last
+.I n
+bars, to be merged by their start times into what the client already has.
+.TP
+.B /range?pair=ZEC&since=1700000000
+the highest and lowest price since a time (Unix seconds):
+.B {"pair",\:"since",\:"n",\:"high",\:"high_t",\:"low",\:"low_t",\:"price"}.
+.TP
+.B /heat?pair=ZEC
+the modelled liquidation ladder of a pair, one bucket per percentage point from the price (0 to 1 per cent up to 19 to 20), longs below the price, shorts above:
+.RS
+.nf
+{"pair", "sym", "src", "age_s", "ladder_age_s", "book_age_s", "mark", "price",
+ "oi_usd", "bid_cov", "ask_cov", "cog", "cogn",
+ "L":[20], "S":[20], "pl":[20], "ps":[20]}
+.fi
+.RE
+.PP
+.B L
+and
+.B S
+are the liquidation notional of each bucket (longs, shorts),
+.B pl
+and
+.B ps
+the pressure (those liquidations over the order\-book depth to the same distance),
+.B cog
+the centre of gravity as a per cent from the price, the mass\-weighted mean, and
+.B cogn
+the same with each level weighted by mass over distance squared.  An answer of 404 means no data for the pair, 503 that heat is not configured; wincan then shows no strip.
+.SH ERRORS
+400 for a request that is wrong, 404 for an unknown pair, 405 for anything but GET, 503 when a source is not available.  The body is always an object with an
+.B error
+member.
+.SH EXAMPLE
+.nf
+curl \-\-cacert server.crt \-\-cert client.crt \-\-key client.key 'https://localhost:8766/candles?pair=BTC&tf=1m&n=2'
+curl 'http://127.0.0.1:8766/pairs'          # a supply in plain HTTP on the loopback address
+.fi
+.SH SEE ALSO
+.BR candled (8),
+.BR wincan (1),
+.BR wincan (5)

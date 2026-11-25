@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+case "$1" in
+purge)
+    rm -rf /etc/candled /var/lib/candled
+    if getent passwd candled >/dev/null; then deluser --system candled >/dev/null 2>&1 || true; fi
+    ;;
+esac
+
+#DEBHELPER#
