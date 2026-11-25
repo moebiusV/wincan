@@ -2,7 +2,7 @@
 # BEST EFFORT AND NOT YET TESTED on Alpine; the Debian packaging in debian/ is the tested one.
 # Maintainer: David Walther <david@clearbrookdistillery.com>
 pkgname=wincan
-pkgver=1.1.1
+pkgver=1.1.2
 pkgrel=0
 pkgdesc="Candle server (candled) for wincan, and the Windows candle window"
 url="https://github.com/moebiusV/wincan"

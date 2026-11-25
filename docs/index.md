@@ -74,7 +74,7 @@ wincan only needs *a candle supply*. `candled` is one; anything that speaks the 
 
 ### Windows: the window
 
-Download `wincan-1.1.1-win64.zip` from the [latest release](https://github.com/moebiusV/wincan/releases/latest), unpack it, open PowerShell in the unpacked folder, and run:
+Download `wincan-1.1.2-win64.zip` from the [latest release](https://github.com/moebiusV/wincan/releases/latest), unpack it, open PowerShell in the unpacked folder, and run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File install.ps1 -Server https://HOST:8766 -ServerPin SHA256:... -Launch
@@ -92,14 +92,14 @@ No administrator rights are needed. It puts `wincan.exe` in `%LOCALAPPDATA%\Prog
 ### Linux (Debian, Ubuntu, Fedora, Alpine, WSL2): the candle supply
 
 ```sh
-tar xf wincan-1.1.1.tar.gz && cd wincan-1.1.1
+tar xf wincan-1.1.2.tar.gz && cd wincan-1.1.2
 sudo sh linux/install-candled.sh          # builds, installs, makes the service user and the server key, starts the service
 ```
 
 It detects `apt`, `dnf`/`yum`, `zypper`, `apk` (and installs the build dependencies if you let it), uses **systemd** or **OpenRC**,
 and on **WSL2 without systemd** tells you how to start candled (or turns systemd on in `/etc/wsl.conf`, with a backup, if you ask).
 At the end it prints the **server fingerprint** and the command to authorize a client. Or do it yourself: `./configure && make && sudo make install`.
-On Debian and Ubuntu, `dpkg-buildpackage -us -uc -b` makes proper packages.
+On Debian and Ubuntu, `dpkg-buildpackage -us -uc -b` makes one package, `wincan`, with the server and the Windows files (for WSL2).
 
 ### WSL2 and Windows on one machine
 

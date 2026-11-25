@@ -4,5 +4,5 @@
 set -e
 cd "$(dirname "$0")"
 mkdir -p m4 build-aux
-autoreconf --force --install --verbose
+autoreconf --install --verbose        # no --force: it would replace our INSTALL with the generic one
 echo "bootstrap: now  ./configure && make && make check"

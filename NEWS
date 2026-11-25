@@ -1,3 +1,8 @@
+wincan 1.1.2 (2026-11-25)
+  The Debian packages are one package, wincan, holding the server and the Windows files (the PowerShell installer, for WSL2); it replaces candled and
+  wincan-windows.  The release has one source tarball (.tar.gz).  INSTALL is the wincan installation guide again: ./bootstrap had replaced it with the generic
+  GNU file in the releases since 1.0.0 (bootstrap no longer forces that).  No change in behaviour of the programs.
+
 wincan 1.1.1 (2026-11-25)
   candled-data(5) documents the on-disk formats candled reads (the 30-byte frames of the candle files and the 80-byte minute records), contrib/candle-writer.py
   writes them as an example, and tests/test_formats.sh reads them back through candled.

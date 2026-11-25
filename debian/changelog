@@ -1,3 +1,12 @@
+wincan (1.1.2-1) unstable; urgency=medium
+
+  * One package, wincan, with the server and the Windows files; it replaces
+    candled and wincan-windows.
+  * INSTALL is the real installation guide again (bootstrap had replaced it
+    with the generic GNU file).
+
+ -- David Walther <david@clearbrookdistillery.com>  Wed, 25 Nov 2026 03:18:01 -0800
+
 wincan (1.1.1-1) unstable; urgency=medium
 
   * candled-data(5) documents the on-disk formats candled reads; an example

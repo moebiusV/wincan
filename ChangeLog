@@ -57,3 +57,4 @@
 2026-11-25  man/candled-data.5: the formats of the candle files and the minute records; contrib/candle-writer.py; tests/test_formats.sh.
 2026-11-25  Release 1.1.1: documentation, an example writer and a test; no change in behaviour.
 2026-11-25  The release is one source tarball, .tar.gz: no .tar.xz (configure.ac without dist-xz).
+2026-11-25  Release 1.1.2: one Debian package (wincan) for the server and the Windows files; INSTALL restored (bootstrap no longer uses --force).

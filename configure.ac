@@ -2,7 +2,7 @@ dnl configure.ac -- wincan: candled, the candle server for Linux, and wincan.exe
 dnl Process with `./bootstrap` (autoreconf); a release tarball already has the configure script.
 
 AC_PREREQ([2.69])
-AC_INIT([wincan], [1.1.1], [https://github.com/moebiusV/wincan/issues], [wincan], [https://github.com/moebiusV/wincan])
+AC_INIT([wincan], [1.1.2], [https://github.com/moebiusV/wincan/issues], [wincan], [https://github.com/moebiusV/wincan])
 AC_CONFIG_SRCDIR([src/candled.c])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIRS([m4])

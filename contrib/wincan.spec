@@ -1,7 +1,7 @@
 # wincan.spec -- RPM packaging for Fedora, RHEL and relatives (candled, and the Windows files).
 # BEST EFFORT AND NOT YET TESTED on an RPM system; the Debian packaging in debian/ is the tested one.
 Name:           wincan
-Version:        1.1.1
+Version:        1.1.2
 Release:        1%{?dist}
 Summary:        Candle server and Windows candle window
 License:        GPL-3.0-or-later AND ISC
@@ -83,6 +83,9 @@ fi
 %{_mandir}/man5/wincan.5*
 
 %changelog
+* Wed Nov 25 2026 David Walther <david@clearbrookdistillery.com> - 1.1.2-1
+- Version only: the Debian packages are one package now; this spec still has the server and the Windows files apart.
+
 * Wed Nov 25 2026 David Walther <david@clearbrookdistillery.com> - 1.1.1-1
 - candled-data(5) documents the on-disk formats; an example writer and a test.
 

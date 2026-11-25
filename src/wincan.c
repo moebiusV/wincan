@@ -24,7 +24,7 @@
 #include <time.h>
 
 #ifndef PACKAGE_VERSION
-#define PACKAGE_VERSION "1.1.1"
+#define PACKAGE_VERSION "1.1.2"
 #endif
 
 #define WM_DATA     (WM_APP + 1)
