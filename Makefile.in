@@ -30,7 +30,7 @@ candled: src/candled.c src/agg.c src/agg.h src/heat.c src/heat.h src/tls.c src/t
 	    -o $@ src/candled.c src/agg.c src/heat.c src/tls.c src/candled_conf.c src/hbnf_conf.c -lsqlite3 -lcurl -lssl -lcrypto -lpthread -lm
 
 wincan.exe: src/wincan.c src/gomatch.h
-	$(WINCC) $(CFLAGS) $(WARN) -mwindows -o $@ src/wincan.c -lgdi32 -lwinhttp -lshell32 -luser32 -lws2_32
+	$(WINCC) $(CFLAGS) $(WARN) -mwindows -o $@ src/wincan.c -lgdi32 -lwinhttp -lshell32 -luser32 -lws2_32 -lcrypt32 -lbcrypt
 
 win: wincan.exe
 

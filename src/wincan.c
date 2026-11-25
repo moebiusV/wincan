@@ -1,9 +1,9 @@
 /*
  * wincan -- a small, frameless, always-on-top candle chart window for Windows, fed by candled.
  *
- *   wincan [--server HOST:PORT] [--pair BTC] [--tf 5m] [--shot FILE.bmp]
+ *   wincan [--server [https://]HOST:PORT] [--pair BTC] [--tf 5m] [--shot FILE.bmp] [--fingerprint] [--help] [--version]
  *
- * Win32 + GDI + WinHTTP, no other dependency.  See wincan(1).
+ * Win32 + GDI + WinHTTP (and Windows' own certificate store and CNG for the key), no other dependency.  See wincan(1).
  */
 #define _WIN32_WINNT 0x0601
 #define WIN32_LEAN_AND_MEAN
@@ -11,6 +11,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <winhttp.h>
+#include <wincrypt.h>
+#include <bcrypt.h>
 #include <shellapi.h>
 #include <stdio.h>
 #include <ctype.h>
@@ -51,6 +53,9 @@ typedef struct {
 static struct {
     HWND   hwnd;
     char   host[128]; int port;
+    int    tls;                           /* the server is https://: the client key proves who we are, the server's certificate is pinned */
+    char   pin[72], pin_for[200], client_cert[48];      /* the pinned SHA-256 of the server's certificate (and the server it is for); the thumbprint of the client's certificate */
+    char   err[96];                       /* what is wrong with the connection, in words that fit the window */
     char   pair[24]; int tf;
     int    scale;                         /* percent: 100 = 200x200 */
     int    full, fw, fh, fscale;          /* full screen (f): on; the monitor's width and height; the magnification used there (percent, + and - change it there) */
@@ -153,7 +158,7 @@ static void save_all(void)
     WritePrivateProfileStringA("wincan", "ma9", A.ind[1] ? "1" : "0", A.ini);
     WritePrivateProfileStringA("wincan", "ma200", A.ind[2] ? "1" : "0", A.ini);
     WritePrivateProfileStringA("wincan", "volcandles", A.ind[3] ? "1" : "0", A.ini);
-    snprintf(b, sizeof b, "%s:%d", A.host, A.port); WritePrivateProfileStringA("wincan", "server", b, A.ini);
+    snprintf(b, sizeof b, "%s%s:%d", A.tls ? "https://" : "", A.host, A.port); WritePrivateProfileStringA("wincan", "server", b, A.ini);
     snprintf(b, sizeof b, "%d", A.fscale); WritePrivateProfileStringA("wincan", "fullscale", b, A.ini);
     RECT r; int have_r = 0;
     if (A.hwnd && !A.shot) { if (A.full) { r = A.rest; have_r = 1; } else have_r = GetWindowRect(A.hwnd, &r) != 0; }      /* in full screen the place kept is the small window's */
@@ -165,10 +170,105 @@ static void save_all(void)
 
 static void parse_server(const char *s)
 {
-    const char *c = strrchr(s, ':');
+    const char *c;
+    A.tls = 0;
+    if (!strncmp(s, "https://", 8)) { A.tls = 1; s += 8; }
+    else if (!strncmp(s, "http://", 7)) s += 7;
+    c = strrchr(s, ':');
     if (c) { snprintf(A.host, sizeof A.host, "%.*s", (int)(c - s), s); A.port = atoi(c + 1); }
     else { snprintf(A.host, sizeof A.host, "%s", s); A.port = 8766; }
     if (A.port <= 0) A.port = 8766;
+}
+
+/* ---------------------------------------------------------------- the key and the pin */
+
+/* The client's key lives in the user's certificate store (the installer makes it); wincan finds the certificate by its SHA-1 thumbprint
+ * (client_cert in wincan.ini) and Windows signs with the key, which never leaves the store.  The server's certificate is self-signed: its
+ * SHA-256 fingerprint is pinned (server_pin), or pinned at the first contact. */
+static PCCERT_CONTEXT g_client_cert;
+static char g_client_fp[72];
+
+static int sha256(const BYTE *d, DWORD n, BYTE out[32])
+{
+    BCRYPT_ALG_HANDLE a = NULL; BCRYPT_HASH_HANDLE h = NULL; int ok = 0;
+    if (BCryptOpenAlgorithmProvider(&a, BCRYPT_SHA256_ALGORITHM, NULL, 0) >= 0) {
+        if (BCryptCreateHash(a, &h, NULL, 0, NULL, 0, 0) >= 0) {
+            if (BCryptHashData(h, (PUCHAR)d, n, 0) >= 0 && BCryptFinishHash(h, out, 32, 0) >= 0) ok = 1;
+            BCryptDestroyHash(h);
+        }
+        BCryptCloseAlgorithmProvider(a, 0);
+    }
+    return ok;
+}
+
+static void fp_text(const BYTE h[32], char out[72])
+{
+    memcpy(out, "SHA256:", 7);
+    for (int i = 0; i < 32; i++) snprintf(out + 7 + 2 * i, 3, "%02x", h[i]);
+}
+
+/* "SHA256:AB:CD..", "ab cd .." or 64 digits to the canonical form; 0 if it is one */
+static int norm_fp(const char *in, char out[72])
+{
+    char hex[65]; int n = 0;
+    while (*in == ' ' || *in == '\t') in++;
+    if (!_strnicmp(in, "sha256", 6)) { in += 6; if (*in == ':' || *in == '=') in++; }
+    for (; *in; in++) {
+        if (isxdigit((unsigned char)*in)) { if (n == 64) return 0; hex[n++] = (char)tolower((unsigned char)*in); }
+        else if (*in == ':' || *in == ' ' || *in == '\t') continue;
+        else return 0;
+    }
+    if (n != 64) return 0;
+    hex[n] = 0; snprintf(out, 72, "SHA256:%s", hex);
+    return 1;
+}
+
+static void load_client_cert(void)
+{
+    BYTE hash[20]; CRYPT_HASH_BLOB blob = { sizeof hash, hash }; HCERTSTORE st; int n = 0;
+    g_client_cert = NULL; g_client_fp[0] = 0;
+    for (const char *p = A.client_cert; *p && n < 20; ) {
+        while (*p == ' ' || *p == ':') p++;
+        if (!isxdigit((unsigned char)p[0]) || !isxdigit((unsigned char)p[1])) break;
+        char b[3] = { p[0], p[1], 0 }; hash[n++] = (BYTE)strtoul(b, NULL, 16); p += 2;
+    }
+    if (n != 20) return;
+    if (!(st = CertOpenStore(CERT_STORE_PROV_SYSTEM_A, 0, 0, CERT_SYSTEM_STORE_CURRENT_USER, "MY"))) return;
+    g_client_cert = CertFindCertificateInStore(st, X509_ASN_ENCODING, 0, CERT_FIND_HASH, &blob, NULL);       /* the store stays open: the context needs it */
+    if (g_client_cert) { BYTE h[32]; if (sha256(g_client_cert->pbCertEncoded, g_client_cert->cbCertEncoded, h)) fp_text(h, g_client_fp); }
+}
+
+/* a console to print on, for a program that is not a console program: the one it was started from, else a message box */
+static void say(const char *text)
+{
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        HANDLE o = GetStdHandle(STD_OUTPUT_HANDLE); DWORD w;
+        if (o && o != INVALID_HANDLE_VALUE && WriteFile(o, text, (DWORD)strlen(text), &w, NULL)) return;
+    }
+    MessageBoxA(NULL, text, "wincan", MB_OK);
+}
+
+/* the server's certificate against the pin; the first contact sets it (and says so once) */
+#define WM_PINNED (WM_APP + 5)
+static char g_pin_note[300];
+static int check_pin(HINTERNET r)
+{
+    PCCERT_CONTEXT sc = NULL; DWORD sz = sizeof sc; BYTE h[32]; char fp[72]; int ok;
+    if (!WinHttpQueryOption(r, WINHTTP_OPTION_SERVER_CERT_CONTEXT, &sc, &sz) || !sc) { snprintf(A.err, sizeof A.err, "no certificate from the server"); return 0; }
+    ok = sha256(sc->pbCertEncoded, sc->cbCertEncoded, h);
+    CertFreeCertificateContext(sc);
+    if (!ok) { snprintf(A.err, sizeof A.err, "cannot check the server's certificate"); return 0; }
+    fp_text(h, fp);
+    if (!A.pin[0]) {                                  /* first contact: trust it now, and never another */
+        char sv[200]; snprintf(sv, sizeof sv, "%s:%d", A.host, A.port);
+        snprintf(A.pin, sizeof A.pin, "%s", fp); snprintf(A.pin_for, sizeof A.pin_for, "%s", sv);
+        WritePrivateProfileStringA("wincan", "server_pin", fp, A.ini); WritePrivateProfileStringA("wincan", "server_pin_for", sv, A.ini);
+        snprintf(g_pin_note, sizeof g_pin_note, "wincan trusts the server certificate from now on:\n\n%s\n\nIf this is not the fingerprint candled printed (candled --fingerprint), close wincan and remove server_pin from wincan.ini.", fp);
+        if (A.hwnd) PostMessage(A.hwnd, WM_PINNED, 0, 0);
+        return 1;
+    }
+    if (strcmp(A.pin, fp)) { snprintf(A.err, sizeof A.err, "the server's certificate has changed"); return 0; }
+    return 1;
 }
 
 /* ---------------------------------------------------------------- the network (a worker thread) */
@@ -210,8 +310,26 @@ static char *http_get(const char *path)
         if (!g_conn) { http_close(); return NULL; }
     }
     char *out = NULL; int ok = 0;
-    HINTERNET r = WinHttpOpenRequest(g_conn, L"GET", wpath, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-    if (r && WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(r, NULL)) {
+    HINTERNET r = WinHttpOpenRequest(g_conn, L"GET", wpath, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, A.tls ? WINHTTP_FLAG_SECURE : 0);
+    int sent = 0;
+    if (r && A.tls) {
+        /* the certificate is self-signed and pinned: the usual checks cannot pass and are replaced by check_pin */
+        DWORD sf = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_CN_INVALID | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+        WinHttpSetOption(r, WINHTTP_OPTION_SECURITY_FLAGS, &sf, sizeof sf);
+        if (!g_client_cert) snprintf(A.err, sizeof A.err, "no client key: see client_cert in wincan.ini");
+        else WinHttpSetOption(r, WINHTTP_OPTION_CLIENT_CERT_CONTEXT, (LPVOID)g_client_cert, sizeof(CERT_CONTEXT));
+    }
+    if (r && (!A.tls || g_client_cert)) {
+        sent = WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+        if (!sent && A.tls && GetLastError() == ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED) {
+            WinHttpSetOption(r, WINHTTP_OPTION_CLIENT_CERT_CONTEXT, (LPVOID)g_client_cert, sizeof(CERT_CONTEXT));
+            sent = WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+        }
+        if (sent && A.tls && !check_pin(r)) sent = 0;                                   /* not the server we pinned */
+        else if (!sent && A.tls && !A.err[0]) snprintf(A.err, sizeof A.err, "the server refused this key (not authorized?)");
+    }
+    if (r && sent && WinHttpReceiveResponse(r, NULL)) {
+        A.err[0] = 0;
         DWORD code = 0, sz = sizeof code;
         WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &code, &sz, NULL);
         size_t cap = 8192, len = 0; char *buf = malloc(cap);
@@ -660,7 +778,7 @@ static void paint(HDC dc, int W, int H)
     }
     char hov_price[32] = "", hov_dt[40] = "";                          /* the top centre: with the mouse over the chart, the price under it and the date and time of its candle (set below), always with the clock */
     if (!have || n == 0) {
-        text(dc, fn, failed ? COL_DOWN : COL_DIM, W / 2, H / 2 - U(8), failed ? "no connection to the server" : "loading...", 2);
+        text(dc, fn, failed ? COL_DOWN : COL_DIM, W / 2, H / 2 - U(8), failed ? (A.err[0] ? A.err : "no connection to the server") : "loading...", 2);
     } else {
         /* the chart */
         int rpad = U(12);                                          /* black space at the right, to see the newest candle move */
@@ -1361,6 +1479,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         case '-': if (A.full) { if (A.fscale > 75) { A.fscale -= 25; InvalidateRect(h, NULL, FALSE); save_all(); } } else if (A.scale > 75) { A.scale -= 25; resize_window(); save_all(); wake(); } break;
         }
         return 0;
+    case WM_PINNED: MessageBoxA(h, g_pin_note, "wincan", MB_OK | MB_ICONINFORMATION | MB_TOPMOST); return 0;
     case WM_DISPLAYCHANGE: set_full(0); return 0;              /* the screen changed (resolution, a monitor gone): back to the small window */
     case WM_HOTKEY: show_hide(A.hidden); return 0;
     case WM_POWERBROADCAST:                                    /* the laptop suspends and resumes: the connection to the server is gone; make a new one at the next poll */
@@ -1402,10 +1521,14 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     A.tf = 2; for (int i = 0; i < NTF; i++) if (!strcmp(tfs, TFS[i])) A.tf = i;
     { char ipb[64] = "", forb[200] = "", now_sv[200]; GetPrivateProfileStringA("wincan", "serverip", "", ipb, sizeof ipb, A.ini); GetPrivateProfileStringA("wincan", "serverip_for", "", forb, sizeof forb, A.ini);
       snprintf(now_sv, sizeof now_sv, "%s:%d", A.host, A.port); if (!strcmp(forb, now_sv)) snprintf(A.ip, sizeof A.ip, "%s", ipb); }
+    GetPrivateProfileStringA("wincan", "client_cert", "", A.client_cert, sizeof A.client_cert, A.ini);
+    { char sv[200], pf[200], pn[100] = ""; snprintf(sv, sizeof sv, "%s:%d", A.host, A.port);
+      GetPrivateProfileStringA("wincan", "server_pin_for", "", pf, sizeof pf, A.ini); GetPrivateProfileStringA("wincan", "server_pin", "", pn, sizeof pn, A.ini);
+      if (!strcmp(pf, sv) && norm_fp(pn, A.pin)) snprintf(A.pin_for, sizeof A.pin_for, "%s", pf); else A.pin[0] = 0; }
     A.field_last = GetPrivateProfileIntA("wincan", "editfield", 0, A.ini); A.ind[0] = GetPrivateProfileIntA("wincan", "bollinger", 1, A.ini); A.ind[1] = GetPrivateProfileIntA("wincan", "ma9", 1, A.ini); A.ind[2] = GetPrivateProfileIntA("wincan", "ma200", 1, A.ini); A.ind[3] = GetPrivateProfileIntA("wincan", "volcandles", 0, A.ini); A.hover = -1;
     A.scale = GetPrivateProfileIntA("wincan", "scale", 100, A.ini); if (A.scale < 75 || A.scale > 400) A.scale = 100;
     A.fscale = GetPrivateProfileIntA("wincan", "fullscale", 200, A.ini); if (A.fscale < 75 || A.fscale > 400) A.fscale = 200;
-    int server_given = 0, argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    int server_given = 0, want_fp = 0, argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; i++) {
         char a[256]; WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, a, sizeof a, NULL, NULL);
         char nx[256] = ""; if (i + 1 < argc) WideCharToMultiByte(CP_UTF8, 0, argv[i + 1], -1, nx, sizeof nx, NULL, NULL);
@@ -1426,7 +1549,30 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
         else if (!strcmp(a, "--shot-hover") && i + 1 < argc) { A.hover = atoi(nx); i++; }
         else if (!strcmp(a, "--shot-off") && i + 1 < argc) { A.ind[atoi(nx) % 4] = 0; i++; }
         else if (!strcmp(a, "--shot-on") && i + 1 < argc) { A.ind[atoi(nx) % 4] = 1; i++; }
-        else if (!strcmp(a, "--version")) { MessageBoxA(NULL, "wincan " PACKAGE_VERSION, "wincan", MB_OK); return 0; }
+        else if (!strcmp(a, "--version")) {
+            say("wincan " PACKAGE_VERSION "\nCopyright (C) 2026 David Walther\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\n"
+                "This is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n");
+            return 0; }
+        else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
+            say("Usage: wincan [OPTION]...\nA small candle chart window, fed by a candle supply such as candled.\n\n"
+                "  --server [https://]HOST:PORT  the candle supply (kept in wincan.ini); https:// means an encrypted connection,\n"
+                "                                with this computer's key, to a server that has authorized it (candled(8))\n"
+                "  --pair NAME, --tf FRAME       start with this coin and timeframe (1m 3m 5m 15m 30m 1h 4h 1d 1w)\n"
+                "  --scale PERCENT               the size of the window, 75 to 400\n"
+                "  --fingerprint                 print the SHA-256 fingerprint of this computer's key, for candled --authorize\n"
+                "  -h, --help                    display this help and exit\n"
+                "      --version                 output version information and exit\n\n"
+                "Keys, clicks and the settings file: wincan(1) and wincan(5).\n"
+                "Report bugs at https://github.com/moebiusV/wincan/issues\n");
+            return 0; }
+        else if (!strcmp(a, "--fingerprint")) want_fp = 1;
+    }
+    { char sv[200]; snprintf(sv, sizeof sv, "%s:%d", A.host, A.port); if (strcmp(A.pin_for, sv)) A.pin[0] = 0; }      /* a pin is for the server it was made for */
+    if (A.tls || want_fp) load_client_cert();
+    if (want_fp) {
+        if (g_client_fp[0]) { char m[200]; snprintf(m, sizeof m, "%s\n", g_client_fp); say(m); return 0; }
+        say("wincan: no client key found (client_cert in wincan.ini names its thumbprint; the installer makes the key)\n");
+        return 1;
     }
     if (server_given && !A.shot) save_all();                       /* the server given on the command line is kept */
     if (!A.shot && !A.test_close) {                              /* one copy only: another that finds this one says so (it shows the window) and leaves */
