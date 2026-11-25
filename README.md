@@ -3,7 +3,7 @@
 # wincan
 
 **A Windows GUI and a Linux server to view your stock and crypto charts in real time, and see your win/loss as it happens.**<br>
-The chart is small, frameless and always on top of your desktop; the server is yours, and the two talk over an encrypted, key-authenticated connection.
+The chart is a small frameless window that stays on top of your desktop, or **full screen** at the press of `f` (and back exactly where it was); the server is yours, and the two talk over an encrypted, key-authenticated connection.
 
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3%2B-blue.svg)](COPYING)
 [![Release](https://img.shields.io/github/v/release/moebiusV/wincan?display_name=tag)](https://github.com/moebiusV/wincan/releases/latest)

@@ -2,7 +2,7 @@ wincan
 ======
 
 wincan is a Windows GUI and a Linux server to view your stock and crypto charts in real time, and see your
-win/loss as it happens.
+win/loss as it happens.  The chart is a small window that stays on top of your desktop, or full screen on f.
 
   wincan.exe   the window: 300x175 pixels, no frame, always on top, candles with indicators, the last price, your
                position's profit and loss, a liquidation heat strip, full screen on f; one file, nothing but Windows.
