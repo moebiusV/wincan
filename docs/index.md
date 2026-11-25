@@ -1,14 +1,14 @@
 ---
 title: wincan
-description: A candle chart for the Windows desktop, and the server that feeds it
+description: A Windows GUI and a Linux server to view your stock and crypto charts in real time, and see your win/loss as it happens
 ---
 
 <div align="center">
 
 # wincan
 
-**A candle chart that lives on your Windows desktop.**<br>
-Small, frameless, always on top, and fed by a server you control, over an encrypted, key-authenticated connection.
+**A Windows GUI and a Linux server to view your stock and crypto charts in real time, and see your win/loss as it happens.**<br>
+The chart is small, frameless and always on top of your desktop; the server is yours, and the two talk over an encrypted, key-authenticated connection.
 
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3%2B-blue.svg)](https://github.com/moebiusV/wincan/blob/main/COPYING)
 [![Release](https://img.shields.io/github/v/release/moebiusV/wincan?display_name=tag)](https://github.com/moebiusV/wincan/releases/latest)

@@ -4,7 +4,7 @@
 set -e
 top=$(cd "$(dirname "$0")/.." && pwd)
 {
-    printf -- '---\ntitle: wincan\ndescription: A candle chart for the Windows desktop, and the server that feeds it\n---\n\n'
+    printf -- '---\ntitle: wincan\ndescription: A Windows GUI and a Linux server to view your stock and crypto charts in real time, and see your win/loss as it happens\n---\n\n'
     sed -e 's|docs/img/|img/|g' \
         -e 's|(COPYING)|(https://github.com/moebiusV/wincan/blob/main/COPYING)|g' \
         -e 's|(INSTALL)|(https://github.com/moebiusV/wincan/blob/main/INSTALL)|g' \

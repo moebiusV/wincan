@@ -1,7 +1,8 @@
 wincan
 ======
 
-A candle chart for the Windows desktop, and the server that feeds it.
+wincan is a Windows GUI and a Linux server to view your stock and crypto charts in real time, and see your
+win/loss as it happens.
 
   wincan.exe   the window: 300x175 pixels, no frame, always on top, candles with indicators, the last price, your
                position's profit and loss, a liquidation heat strip, full screen on f; one file, nothing but Windows.

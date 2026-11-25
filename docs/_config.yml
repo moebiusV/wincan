@@ -1,6 +1,6 @@
 # GitHub Pages (Jekyll) settings for the project site; the page itself, index.md, is made from README.md by tools/mkpages.sh
 title: wincan
-description: A candle chart for the Windows desktop, and the server that feeds it
+description: A Windows GUI and a Linux server to view your stock and crypto charts in real time, and see your win/loss as it happens
 theme: jekyll-theme-cayman
 show_downloads: false
 markdown: kramdown
